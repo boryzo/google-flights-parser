@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Literal, Optional
+from typing import Any, List, Literal, Optional
 
 
 @dataclass
 class Result:
     current_price: Literal["low", "typical", "high"]
     flights: List[Flight]
+    advanced: Optional[dict[str, Any]] = None
 
 
 @dataclass

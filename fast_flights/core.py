@@ -8,6 +8,7 @@ from .decoder import DecodedResult, ResultDecoder
 from .schema import Flight, Result
 from .flights_impl import FlightData, Passengers
 from .filter import TFSData
+from .advanced_parser import parse_advanced_response
 from .fallback_playwright import fallback_playwright_fetch
 from .bright_data_fetch import bright_data_fetch
 from .primp import Client, Response
@@ -232,6 +233,7 @@ def parse_response(
         return ResultDecoder.decode(data) if data is not None else None
 
     flights = []
+    advanced = parse_advanced_response(r.text)
 
     for i, fl in enumerate(parser.css('div[jsname="IWWDBc"], div[jsname="YdtKid"]')):
         is_best_flight = i == 0
@@ -293,4 +295,8 @@ def parse_response(
     if not flights:
         raise RuntimeError("No flights found:\n{}".format(r.text_markdown))
 
-    return Result(current_price=current_price, flights=[Flight(**fl) for fl in flights])  # type: ignore
+    return Result(
+        current_price=current_price,
+        flights=[Flight(**fl) for fl in flights],
+        advanced=advanced,
+    )  # type: ignore
