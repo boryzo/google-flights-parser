@@ -1,20 +1,31 @@
-import re
 import json
+import re
+from datetime import datetime
 from typing import List, Literal, Optional, Union
+from urllib.parse import parse_qs, urlparse
 
 from selectolax.lexbor import LexborHTMLParser, LexborNode
 
 from .decoder import DecodedResult, ResultDecoder
-from .schema import Flight, Result
+from .schema import Flight, Result, Segment
 from .flights_impl import FlightData, Passengers
 from .filter import TFSData
-from .advanced_parser import parse_advanced_response
 from .fallback_playwright import fallback_playwright_fetch
 from .bright_data_fetch import bright_data_fetch
 from .primp import Client, Response
 
 
 DataSource = Literal['html', 'js']
+
+SEGMENT_RE = re.compile(
+    r"^(?P<orig>[A-Z]{3})-(?P<dest>[A-Z]{3})-(?P<carrier>[A-Z0-9]{2,3})-(?P<flight>\d{1,5})-(?P<date>\d{8})$"
+)
+DURATION_RE = re.compile(r"(?P<h>\d+)\s*hr\s*(?P<m>\d+)\s*min", re.IGNORECASE)
+STOPS_RE = re.compile(
+    r"(?P<count>\d+)\s+stops?\s+in\s+(?P<airports>[A-Z]{3}(?:,\s*[A-Z]{3})*)",
+    re.IGNORECASE,
+)
+TRIP_TYPE_RE = re.compile(r"\b(round trip|one way)\b", re.IGNORECASE)
 
 # Default cookies embedded into the app to help bypass common consent gating.
 # These are used only if the caller does not supply cookies (binary) and
@@ -90,6 +101,108 @@ def _merge_binary_cookies(cookies_bytes: bytes | None, request_kwargs: dict | No
         pass
 
     return req_kwargs
+
+
+def _parse_duration_minutes(text: str) -> Optional[int]:
+    if not text:
+        return None
+    match = DURATION_RE.search(text.strip())
+    if not match:
+        return None
+    hours = int(match.group("h"))
+    minutes = int(match.group("m"))
+    return hours * 60 + minutes
+
+
+def _parse_stops_text(text: str) -> tuple[Optional[int], Optional[List[str]]]:
+    if not text:
+        return None, None
+    t = text.strip()
+    if "nonstop" in t.lower():
+        return 0, []
+    match = STOPS_RE.search(t)
+    if not match:
+        return None, None
+    count = int(match.group("count"))
+    airports = [x.strip().upper() for x in match.group("airports").split(",")]
+    return count, airports
+
+
+def _parse_travelimpact_url(url: Optional[str]) -> tuple[Optional[str], Optional[List[Segment]]]:
+    if not url:
+        return None, None
+    parsed = urlparse(url)
+    qs = parse_qs(parsed.query)
+    itinerary = qs.get("itinerary", [None])[0]
+    if not itinerary:
+        return None, None
+    segments: list[Segment] = []
+    for part in itinerary.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        match = SEGMENT_RE.match(part)
+        if not match:
+            continue
+        date_raw = match.group("date")
+        try:
+            date_iso = datetime.strptime(date_raw, "%Y%m%d").date().isoformat()
+        except ValueError:
+            date_iso = date_raw
+        segments.append(
+            Segment(
+                origin=match.group("orig"),
+                destination=match.group("dest"),
+                carrier_code=match.group("carrier"),
+                flight_number=match.group("flight"),
+                date=date_iso,
+            )
+        )
+    return itinerary, segments if segments else None
+
+
+def _find_match(pattern: re.Pattern[str], text: str) -> Optional[str]:
+    match = pattern.search(text)
+    return match.group(0).strip() if match else None
+
+
+def _find_card(node: LexborNode) -> Optional[LexborNode]:
+    card = node
+    for _ in range(10):
+        if card is None:
+            break
+        if card.css_first('span[role="text"][aria-label]') or card.css_first(".h1fkLb"):
+            return card
+        card = card.parent
+    return card
+
+
+def _find_travelimpact_node(node: LexborNode) -> Optional[LexborNode]:
+    current = node
+    for _ in range(10):
+        if current is None:
+            break
+        if current.attributes.get("data-travelimpactmodelwebsiteurl"):
+            return current
+        impact = current.css_first("[data-travelimpactmodelwebsiteurl]")
+        if impact:
+            return impact
+        current = current.parent
+    return None
+
+
+def _parse_airline_logo_url(card: Optional[LexborNode]) -> Optional[str]:
+    if not card:
+        return None
+    logo_div = card.css_first('[style*="airline_logos/70px"]')
+    if not logo_div:
+        return None
+    style = logo_div.attributes.get("style", "")
+    match = re.search(
+        r"url\((https://www\.gstatic\.com/flights/airline_logos/70px/[^)]+)\)",
+        style,
+    )
+    return match.group(1) if match else None
 
 
 def get_flights_from_filter(
@@ -233,7 +346,6 @@ def parse_response(
         return ResultDecoder.decode(data) if data is not None else None
 
     flights = []
-    advanced = parse_advanced_response(r.text)
 
     for i, fl in enumerate(parser.css('div[jsname="IWWDBc"], div[jsname="YdtKid"]')):
         is_best_flight = i == 0
@@ -277,6 +389,26 @@ def parse_response(
             except ValueError:
                 stops_fmt = "Unknown"
 
+            card = _find_card(item)
+            trip_type = _find_match(TRIP_TYPE_RE, card.text()) if card else None
+            if trip_type:
+                trip_type = trip_type.lower()
+
+            stops_count, stop_airports = _parse_stops_text(stops)
+            duration_minutes = _parse_duration_minutes(duration)
+
+            impact_node = _find_travelimpact_node(item)
+            travelimpact_url = (
+                impact_node.attributes.get("data-travelimpactmodelwebsiteurl")
+                if impact_node
+                else None
+            )
+            itinerary_raw, segments = _parse_travelimpact_url(travelimpact_url)
+            segments_count = len(segments) if segments else None
+            inferred_stops_from_itinerary = (len(segments) - 1) if segments else None
+
+            airline_logo_url = _parse_airline_logo_url(card)
+
             flights.append(
                 {
                     "is_best": is_best_flight,
@@ -288,6 +420,15 @@ def parse_response(
                     "stops": stops_fmt,
                     "delay": delay,
                     "price": price.replace(",", ""),
+                    "trip_type": trip_type,
+                    "stops_count": stops_count,
+                    "stop_airports": stop_airports,
+                    "duration_minutes": duration_minutes,
+                    "itinerary_raw": itinerary_raw,
+                    "segments": segments,
+                    "segments_count": segments_count,
+                    "inferred_stops_from_itinerary": inferred_stops_from_itinerary,
+                    "airline_logo_url": airline_logo_url,
                 }
             )
 
@@ -298,5 +439,4 @@ def parse_response(
     return Result(
         current_price=current_price,
         flights=[Flight(**fl) for fl in flights],
-        advanced=advanced,
     )  # type: ignore
