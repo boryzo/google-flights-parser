@@ -1,14 +1,22 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, List, Literal, Optional
+from typing import List, Literal, Optional
 
 
 @dataclass
 class Result:
     current_price: Literal["low", "typical", "high"]
     flights: List[Flight]
-    advanced: Optional[dict[str, Any]] = None
+
+
+@dataclass
+class Segment:
+    origin: str
+    destination: str
+    carrier_code: str
+    flight_number: str
+    date: str  # YYYY-MM-DD
 
 
 @dataclass
@@ -22,3 +30,12 @@ class Flight:
     stops: int
     delay: Optional[str]
     price: str
+    trip_type: Optional[str] = None
+    stops_count: Optional[int] = None
+    stop_airports: Optional[List[str]] = None
+    duration_minutes: Optional[int] = None
+    itinerary_raw: Optional[str] = None
+    segments: Optional[List[Segment]] = None
+    segments_count: Optional[int] = None
+    inferred_stops_from_itinerary: Optional[int] = None
+    airline_logo_url: Optional[str] = None
