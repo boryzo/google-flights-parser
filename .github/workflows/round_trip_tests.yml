@@ -20,4 +20,4 @@ jobs:
           pip install -r requirements.txt
           pip install pytest
       - name: Run round-trip integration test
-        run: pytest tests/test_round_trip_gdn_jfk.py
+        run: pytest -s --log-cli-level=DEBUG tests/test_round_trip_gdn_jfk.py
