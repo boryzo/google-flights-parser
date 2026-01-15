@@ -40,31 +40,26 @@ _DEFAULT_COOKIES = {
 }
 _DEFAULT_COOKIES_BYTES = json.dumps(_DEFAULT_COOKIES).encode("utf-8")
 
+# Observed listing tfu for initial search in browser.
 _TFU_LISTING_DEFAULT = "KgIIAw"
 
+# Observed follow-up patterns in browser for selected outbound.
 _TFS2_PREFIXES = ("CBwQAh",)
 _TFU2_PREFIXES = ("Cn",)
 
-# More permissive pair extractor:
-# - handles "&", "\u0026", "&amp;"
-# - handles "\u003d" (escaped '=')
-# - does not require strict separators, only that tfs appears before tfu
+# More tolerant extraction of "tfs=... tfu=..." pairs from HTML/JS.
 _TFS_TFU_PAIR_RE = re.compile(
     r"""
     tfs(?:=|\\u003d)(?P<tfs>[A-Za-z0-9%_\-+/=]{20,})
     (?:
-        [^A-Za-z0-9%_\-+/=]{0,200}
+        [^A-Za-z0-9%_\-+/=]{0,400}
     )
     tfu(?:=|\\u003d)(?P<tfu>[A-Za-z0-9%_\-+/=]{4,})
     """,
     re.VERBOSE,
 )
 
-# Booking tfs can appear in many forms:
-# - full URL
-# - relative path
-# - escaped slashes
-# - plain "booking?tfs="
+# Booking deep link in various encodings.
 _BOOKING_TFS_RE = re.compile(
     r"""
     (?:
@@ -77,6 +72,10 @@ _BOOKING_TFS_RE = re.compile(
     """,
     re.VERBOSE,
 )
+
+# Candidate base64-ish strings embedded in HTML/JS (quoted strings).
+# This is used to infer "booking tfs" when no explicit booking link exists.
+_B64_STRING_RE = re.compile(r'"([A-Za-z0-9\-_+/=]{60,})"')
 
 _B64ISH_RE = re.compile(r"^[A-Za-z0-9\-_+/=]+$")
 
@@ -103,7 +102,7 @@ def _merge_binary_cookies(cookies_bytes: bytes | None, request_kwargs: dict | No
     if not cookies_bytes:
         return req_kwargs
 
-    # JSON bytes
+    # Try JSON first
     try:
         s = cookies_bytes.decode("utf-8")
         parsed = json.loads(s)
@@ -119,7 +118,7 @@ def _merge_binary_cookies(cookies_bytes: bytes | None, request_kwargs: dict | No
     except Exception:
         pass
 
-    # Pickle bytes
+    # Try pickle
     try:
         import pickle
 
@@ -130,7 +129,7 @@ def _merge_binary_cookies(cookies_bytes: bytes | None, request_kwargs: dict | No
     except Exception:
         pass
 
-    # Raw Cookie header bytes
+    # Fallback: treat as raw Cookie header
     try:
         s = cookies_bytes.decode("utf-8")
         headers = req_kwargs.get("headers", {})
@@ -234,10 +233,7 @@ def _parse_airline_logo_url(card: Optional[LexborNode]) -> Optional[str]:
     if not logo_div:
         return None
     style = logo_div.attributes.get("style", "")
-    m = re.search(
-        r"url\((https://www\.gstatic\.com/flights/airline_logos/70px/[^)]+)\)",
-        style,
-    )
+    m = re.search(r"url\((https://www\.gstatic\.com/flights/airline_logos/70px/[^)]+)\)", style)
     return m.group(1) if m else None
 
 
@@ -323,10 +319,7 @@ def _select_outbound(itineraries: list[Itinerary], target_time_minutes: Optional
             ),
         )
 
-    return min(
-        itineraries,
-        key=lambda it: (_itinerary_stops(it), _safe_price_value(it)),
-    )
+    return min(itineraries, key=lambda it: (_itinerary_stops(it), _safe_price_value(it)))
 
 
 def _b64url_decode_bytes(s: str) -> bytes:
@@ -359,24 +352,22 @@ def _extract_followup_pairs_from_html(html: str) -> list[tuple[str, str]]:
 
 
 def _extract_booking_tfs_from_html(html: str) -> Optional[str]:
-    """Extract booking?tfs=... if present."""
+    """Extract explicit booking?tfs=... if present."""
     m = _BOOKING_TFS_RE.search(html)
     if not m:
         return None
     return urllib.parse.unquote(m.group("tfs"))
 
 
-def _score_tfs2_match(selected: Itinerary, tfs2: str) -> int:
-    """Score tfs2 against the selected itinerary by searching decoded bytes for key substrings."""
-    try:
-        b = _b64url_decode_bytes(tfs2)
-    except Exception:
-        return 0
-
+def _score_token_bytes_match(selected: Itinerary, token_b: bytes) -> int:
+    """
+    Score decoded bytes against selected itinerary using substrings.
+    This works without knowing the exact protobuf fields.
+    """
     score = 0
 
     for code in {getattr(selected, "departure_airport", None), getattr(selected, "arrival_airport", None)}:
-        if isinstance(code, str) and code and code.encode("utf-8") in b:
+        if isinstance(code, str) and code and code.encode("utf-8") in token_b:
             score += 3
 
     flights = getattr(selected, "flights", []) or []
@@ -386,13 +377,13 @@ def _score_tfs2_match(selected: Itinerary, tfs2: str) -> int:
         orig = getattr(f, "departure_airport", None)
         dest = getattr(f, "arrival_airport", None)
 
-        if isinstance(carrier, str) and carrier.encode("utf-8") in b:
+        if isinstance(carrier, str) and carrier.encode("utf-8") in token_b:
             score += 2
-        if isinstance(fn, str) and fn.encode("utf-8") in b:
+        if isinstance(fn, str) and fn.encode("utf-8") in token_b:
             score += 2
-        if isinstance(orig, str) and orig.encode("utf-8") in b:
+        if isinstance(orig, str) and orig.encode("utf-8") in token_b:
             score += 1
-        if isinstance(dest, str) and dest.encode("utf-8") in b:
+        if isinstance(dest, str) and dest.encode("utf-8") in token_b:
             score += 1
 
     return score
@@ -403,16 +394,58 @@ def _pick_best_followup_pair(selected: Itinerary, pairs: list[tuple[str, str]]) 
     best_tfs: Optional[str] = None
     best_tfu: Optional[str] = None
     for tfs2, tfu2 in pairs:
-        s = _score_tfs2_match(selected, tfs2)
+        try:
+            b = _b64url_decode_bytes(tfs2)
+        except Exception:
+            continue
+        s = _score_token_bytes_match(selected, b)
         if s > best_score:
             best_score = s
             best_tfs, best_tfu = tfs2, tfu2
     return best_tfs, best_tfu, best_score
 
 
+def _infer_booking_tfs_from_embedded_strings(html: str, selected: Itinerary) -> Optional[str]:
+    """
+    When no explicit booking link exists, try to infer a booking 'tfs' token from embedded base64-ish strings.
+    The attached listing HTML contains long payload strings in JS blobs. :contentReference[oaicite:1]{index=1}
+    """
+    best_score = 0
+    best_token: Optional[str] = None
+
+    # Limit candidates to keep CPU reasonable in CI.
+    candidates = _B64_STRING_RE.findall(html)
+    if len(candidates) > 5000:
+        candidates = candidates[:5000]
+
+    for tok in candidates:
+        # Quick filter: must look like base64 and typically ends with '=' for padded tokens.
+        if len(tok) < 80:
+            continue
+        if " " in tok:
+            continue
+        if not _B64ISH_RE.fullmatch(tok):
+            continue
+        if not tok.endswith("="):
+            continue
+
+        try:
+            b = _b64url_decode_bytes(tok)
+        except Exception:
+            continue
+
+        s = _score_token_bytes_match(selected, b)
+        if s > best_score:
+            best_score = s
+            best_token = tok
+
+    logger.info("RT JS flow: inferred booking token best_score=%d.", best_score)
+    return best_token if best_score >= 6 else None
+
+
 def _dump_listing_debug(html: str) -> None:
-    """Dump listing HTML/snippets to help diagnose missing follow-up tokens."""
-    if os.getenv("FAST_FLIGHTS_DUMP_HTML", "1") not in ("1", "true", "TRUE", "yes", "YES"):
+    """Dump listing HTML/snippet to help diagnose missing follow-up tokens."""
+    if os.getenv("FAST_FLIGHTS_DUMP_HTML", "1").lower() not in ("1", "true", "yes"):
         return
 
     try:
@@ -421,14 +454,13 @@ def _dump_listing_debug(html: str) -> None:
     except Exception:
         pass
 
-    # Create a small snippet around any "tfs" occurrences.
     try:
         idx = html.find("tfs")
         if idx == -1:
-            snippet = html[:2000]
+            snippet = html[:4000]
         else:
-            start = max(0, idx - 1000)
-            end = min(len(html), idx + 2000)
+            start = max(0, idx - 1500)
+            end = min(len(html), idx + 4000)
             snippet = html[start:end]
         with open("/tmp/fast_flights_listing_snippet.txt", "w", encoding="utf-8") as f:
             f.write(snippet)
@@ -516,7 +548,7 @@ def get_flights_from_filter(
             target_minutes = _parse_target_time(target_time)
             selected_outbound = _select_outbound(outbound_itineraries, target_minutes)
 
-            # Path A: follow-up pairs in listing HTML
+            # Path A: follow-up pairs (tfs2, tfu2) embedded directly in listing HTML
             pairs = _extract_followup_pairs_from_html(res1.text)
             logger.info("RT JS flow: follow-up pairs found in listing HTML=%d.", len(pairs))
 
@@ -540,39 +572,14 @@ def get_flights_from_filter(
                     selected_outbound=selected_outbound,
                 )
 
-            # Path B: booking deep link
+            # Path B: explicit booking deep link present in listing HTML
             booking_tfs = _extract_booking_tfs_from_html(res1.text)
             if booking_tfs:
-                logger.warning("RT JS flow: no follow-up pairs in listing; falling back to booking?tfs flow.")
+                logger.warning("RT JS flow: no follow-up pairs; using explicit booking?tfs flow.")
                 resb = fetch_booking(booking_tfs, request_kwargs=req_kwargs)
-
-                pairs_b = _extract_followup_pairs_from_html(resb.text)
-                logger.info("RT JS flow: follow-up pairs found in booking HTML=%d.", len(pairs_b))
-
-                tfs2b, tfu2b, score_b = _pick_best_followup_pair(selected_outbound, pairs_b)
-                logger.info("RT JS flow: best booking follow-up match score=%d.", score_b)
-
-                if tfs2b and tfu2b and score_b >= 6:
-                    logger.info("RT JS flow: issuing follow-up request #2 via flights endpoint (from booking page).")
-                    res2 = _fetch_with_mode(
-                        {"tfs": tfs2b, "hl": params["hl"], "tfu": tfu2b, "curr": params["curr"]},
-                        mode=mode,
-                        req_kwargs=req_kwargs,
-                    )
-                    inbound_raw = _extract_js_data(res2.text)
-                    inbound_decoded = ResultDecoder.decode(inbound_raw)
-                    logger.info("RT JS flow: parsed inbound results (request #2 from booking).")
-                    return RoundTripDecodedResult(
-                        outbound=outbound_decoded,
-                        inbound=inbound_decoded,
-                        selected_outbound_ref=tfs2b,
-                        selected_outbound=selected_outbound,
-                    )
-
-                # Last resort: decode booking page ds:1 (if present)
                 inbound_raw = _extract_js_data(resb.text)
                 inbound_decoded = ResultDecoder.decode(inbound_raw)
-                logger.warning("RT JS flow: using booking page JS decode as inbound context.")
+                logger.info("RT JS flow: decoded booking page as inbound context.")
                 return RoundTripDecodedResult(
                     outbound=outbound_decoded,
                     inbound=inbound_decoded,
@@ -580,10 +587,26 @@ def get_flights_from_filter(
                     selected_outbound=selected_outbound,
                 )
 
-            # No follow-up found; dump listing for analysis.
+            # Path C: infer booking token from embedded base64-ish strings
+            inferred_booking_tfs = _infer_booking_tfs_from_embedded_strings(res1.text, selected_outbound)
+            if inferred_booking_tfs:
+                logger.warning("RT JS flow: inferred booking token; using booking?tfs flow.")
+                resb = fetch_booking(inferred_booking_tfs, request_kwargs=req_kwargs)
+                inbound_raw = _extract_js_data(resb.text)
+                inbound_decoded = ResultDecoder.decode(inbound_raw)
+                logger.info("RT JS flow: decoded booking page as inbound context (inferred token).")
+                return RoundTripDecodedResult(
+                    outbound=outbound_decoded,
+                    inbound=inbound_decoded,
+                    selected_outbound_ref=inferred_booking_tfs,
+                    selected_outbound=selected_outbound,
+                )
+
+            # Nothing worked; dump listing for diagnosis.
             _dump_listing_debug(res1.text)
             raise RuntimeError(
-                "Round-trip follow-up not found: no (tfs2, tfu2) pairs and no booking?tfs deep link in listing HTML. "
+                "Round-trip follow-up not found: no (tfs2, tfu2) pairs, no explicit booking?tfs, "
+                "and no inferable booking token from embedded strings. "
                 "Dumped listing HTML/snippet to /tmp/fast_flights_listing.html and /tmp/fast_flights_listing_snippet.txt."
             )
 
@@ -712,13 +735,9 @@ def parse_response(
 
             impact_node = _find_travelimpact_node(item)
             travelimpact_url = (
-                impact_node.attributes.get("data-travelimpactmodelwebsiteurl")
-                if impact_node
-                else None
+                impact_node.attributes.get("data-travelimpactmodelwebsiteurl") if impact_node else None
             )
             itinerary_raw, segments = _parse_travelimpact_url(travelimpact_url)
-            segments_count = len(segments) if segments else None
-            inferred_stops_from_itinerary = (len(segments) - 1) if segments else None
 
             airline_logo_url = _parse_airline_logo_url(card)
 
@@ -739,8 +758,8 @@ def parse_response(
                     "duration_minutes": duration_minutes,
                     "itinerary_raw": itinerary_raw,
                     "segments": segments,
-                    "segments_count": segments_count,
-                    "inferred_stops_from_itinerary": inferred_stops_from_itinerary,
+                    "segments_count": len(segments) if segments else None,
+                    "inferred_stops_from_itinerary": (len(segments) - 1) if segments else None,
                     "airline_logo_url": airline_logo_url,
                 }
             )
@@ -749,7 +768,4 @@ def parse_response(
     if not flights:
         raise RuntimeError("No flights found:\n{}".format(r.text_markdown))
 
-    return Result(
-        current_price=current_price,
-        flights=[Flight(**fl) for fl in flights],
-    )  # type: ignore
+    return Result(current_price=current_price, flights=[Flight(**fl) for fl in flights])  # type: ignore
