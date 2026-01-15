@@ -21,3 +21,12 @@ jobs:
           pip install pytest
       - name: Run round-trip integration test
         run: pytest -s --log-cli-level=DEBUG tests/test_round_trip_gdn_jfk.py
+      
+      - name: Upload fast_flights debug dumps
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fast-flights-dumps
+          path: |
+            /tmp/fast_flights_listing.html
+            /tmp/fast_flights_listing_snippet.txt      
