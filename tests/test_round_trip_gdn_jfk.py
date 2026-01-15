@@ -98,10 +98,12 @@ def test_round_trip_gdn_to_jfk_real_time() -> None:
     assert result is not None
     assert hasattr(result, "outbound") and hasattr(result, "inbound")
     
-    # sprawdź, że inbound faktycznie ma itineraria startujące z JFK
-    in_best = getattr(result.inbound, "best", [])
-    in_other = getattr(result.inbound, "other", [])
+    in_best = getattr(result.inbound, "best", []) or []
+    in_other = getattr(result.inbound, "other", []) or []
     assert in_best or in_other, "No inbound options decoded"
     
-    sample = (in_best[0] if in_best else in_other[0])
-    assert getattr(sample, "departure_airport", None) == "JFK", f"Expected inbound departure JFK, got {getattr(sample, 'departure_airport', None)!r}"
+    sample = in_best[0] if in_best else in_other[0]
+    assert getattr(sample, "departure_airport", None) == "JFK", (
+        f"Expected inbound departure JFK, got {getattr(sample, 'departure_airport', None)!r}"
+    )
+
