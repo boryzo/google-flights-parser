@@ -1,5 +1,3 @@
-# core.py
-
 import json
 import logging
 import re
@@ -18,7 +16,6 @@ from .fallback_playwright import fallback_playwright_fetch
 from .bright_data_fetch import bright_data_fetch
 from .primp import Client, Response
 
-
 DataSource = Literal["html", "js"]
 logger = logging.getLogger(__name__)
 
@@ -32,11 +29,21 @@ STOPS_RE = re.compile(
 )
 TRIP_TYPE_RE = re.compile(r"\b(round trip|one way)\b", re.IGNORECASE)
 
+# Default cookies embedded into the app to help bypass common consent gating.
 _DEFAULT_COOKIES = {
     "CONSENT": "PENDING+987",
     "SOCS": "CAESHAgBEhJnd3NfMjAyMzA4MTAtMF9SQzIaAmRlIAEaBgiAo_CmBg",
 }
 _DEFAULT_COOKIES_BYTES = json.dumps(_DEFAULT_COOKIES).encode("utf-8")
+
+# Heurystyki do wyciągania follow-up params z raw JS:
+# - follow-up tfs zwykle zaczyna się od "CBwQAh"
+# - follow-up tfu bywa długie i zaczyna się od "Cn" (np. "CnRDalJJ...")
+_TFS_FOLLOWUP_PREFIXES = ("CBwQAh",)
+_TFU_FOLLOWUP_PREFIXES = ("Cn",)
+
+_B64URL_RE = re.compile(r"^[A-Za-z0-9\-_]+$")  # urlsafe base64 (bez +/ i bez =)
+_B64MIX_RE = re.compile(r"^[A-Za-z0-9\-_+/=]+$")  # mieszane (czasem pojawia się padding)
 
 
 def fetch(params: dict, request_kwargs: dict | None = None) -> Response:
@@ -52,6 +59,7 @@ def _merge_binary_cookies(cookies_bytes: bytes | None, request_kwargs: dict | No
     if not cookies_bytes:
         return req_kwargs
 
+    # Try JSON first
     try:
         s = cookies_bytes.decode("utf-8")
         parsed = json.loads(s)
@@ -67,6 +75,7 @@ def _merge_binary_cookies(cookies_bytes: bytes | None, request_kwargs: dict | No
     except Exception:
         pass
 
+    # Try pickle
     try:
         import pickle
 
@@ -77,6 +86,7 @@ def _merge_binary_cookies(cookies_bytes: bytes | None, request_kwargs: dict | No
     except Exception:
         pass
 
+    # Fallback: treat as raw Cookie header
     try:
         s = cookies_bytes.decode("utf-8")
         headers = req_kwargs.get("headers", {})
@@ -195,10 +205,10 @@ def _extract_js_data(text: str) -> list:
     parser = LexborHTMLParser(text)
     script = parser.css_first(r"script.ds\:1")
     if not script:
-        raise RuntimeError("Malformed js data, cannot find script data")
+        raise RuntimeError("Malformed js data, cannot find script.ds:1")
     match = re.search(r"^.*?\{.*?data:(\[.*\]).*}", script.text())
     if not match:
-        raise RuntimeError("Malformed js data, cannot find script data")
+        raise RuntimeError("Malformed js data, cannot find JSON data array in script.ds:1")
     return json.loads(match.group(1))
 
 
@@ -216,13 +226,6 @@ def _parse_target_time(target_time: Optional[str]) -> Optional[int]:
 
 
 def _time_to_minutes(value: object, *, field_name: str) -> int:
-    """
-    Normalize various decoder time shapes to minutes since midnight:
-    - [H, M] or (H, M)
-    - [H] -> M assumed 0
-    - "HH:MM"
-    """
-    # list/tuple
     if isinstance(value, (list, tuple)):
         if len(value) == 2:
             h, m = value[0], value[1]
@@ -230,16 +233,12 @@ def _time_to_minutes(value: object, *, field_name: str) -> int:
             h, m = value[0], 0
         else:
             raise ValueError(f"{field_name} invalid length: {value!r}")
-        try:
-            h_i = int(h)
-            m_i = int(m)
-        except Exception as e:
-            raise ValueError(f"{field_name} not int-like: {value!r}") from e
+        h_i = int(h)
+        m_i = int(m)
         if not (0 <= h_i <= 23 and 0 <= m_i <= 59):
             raise ValueError(f"{field_name} out of range: {value!r}")
         return h_i * 60 + m_i
 
-    # string
     if isinstance(value, str):
         m = re.match(r"^(?P<h>\d{1,2}):(?P<m>\d{2})$", value.strip())
         if not m:
@@ -254,51 +253,75 @@ def _time_to_minutes(value: object, *, field_name: str) -> int:
 
 
 def _itinerary_departure_minutes(itinerary: Itinerary) -> int:
-    # Decoder sometimes returns [H] instead of [H, M]
-    try:
-        return _time_to_minutes(getattr(itinerary, "departure_time", None), field_name="departure_time")
-    except Exception as e:
-        logger.error("Failed to normalize itinerary.departure_time=%r for itinerary=%r", getattr(itinerary, "departure_time", None), itinerary)
-        raise
+    return _time_to_minutes(getattr(itinerary, "departure_time", None), field_name="departure_time")
 
 
 def _itinerary_stops(itinerary: Itinerary) -> int:
     return max(0, len(itinerary.flights) - 1)
 
 
-def _extract_selection_ref(itinerary_raw: Optional[list]) -> Optional[str]:
-    if not itinerary_raw:
-        return None
-    summary_b64 = None
-    if (
-        len(itinerary_raw) > 1
-        and isinstance(itinerary_raw[1], list)
-        and len(itinerary_raw[1]) > 1
-        and isinstance(itinerary_raw[1][1], str)
-    ):
-        summary_b64 = itinerary_raw[1][1]
-
-    candidates: list[str] = []
-
-    def walk(value: object) -> None:
-        if isinstance(value, list):
-            for item in value:
-                walk(item)
-        elif isinstance(value, str):
-            candidates.append(value)
-
-    walk(itinerary_raw)
-    for candidate in candidates:
-        if candidate == summary_b64:
-            continue
-        if len(candidate) >= 16:
-            return candidate
-    return None
+def _safe_price_value(itinerary: Itinerary) -> float:
+    try:
+        return float(itinerary.itinerary_summary.price)
+    except Exception:
+        return float("inf")
 
 
-def _decode_outbound_options(raw: list) -> list[tuple[Itinerary, Optional[str]]]:
+def _walk_strings(value: object, out: list[str]) -> None:
+    if isinstance(value, list):
+        for item in value:
+            _walk_strings(item, out)
+    elif isinstance(value, str):
+        out.append(value)
+
+
+def _looks_like_b64ish(s: str) -> bool:
+    if not isinstance(s, str):
+        return False
+    if " " in s:
+        return False
+    if len(s) < 16:
+        return False
+    # zwykle urlsafe
+    return bool(_B64MIX_RE.fullmatch(s))
+
+
+def _extract_followup_params_from_raw_item(raw_item: Optional[list]) -> tuple[Optional[str], Optional[str]]:
+    """
+    Z raw_item (konkretna pozycja w JS) wyciągnij gotowe follow-up:
+    - tfs2: zwykle prefix CBwQAh...
+    - tfu2: zwykle prefix Cn...
+    """
+    if not raw_item or not isinstance(raw_item, list):
+        return None, None
+
+    strings: list[str] = []
+    _walk_strings(raw_item, strings)
+
+    # kandydaci tfs2
+    tfs_candidates = [
+        s for s in strings
+        if _looks_like_b64ish(s) and s.startswith(_TFS_FOLLOWUP_PREFIXES)
+    ]
+    # kandydaci tfu2
+    tfu_candidates = [
+        s for s in strings
+        if _looks_like_b64ish(s) and s.startswith(_TFU_FOLLOWUP_PREFIXES) and len(s) >= 40
+    ]
+
+    # preferuj najdłuższe (zwykle bardziej kompletne)
+    tfs2 = max(tfs_candidates, key=len) if tfs_candidates else None
+    tfu2 = max(tfu_candidates, key=len) if tfu_candidates else None
+    return tfs2, tfu2
+
+
+def _decode_outbound_options(raw: list) -> list[tuple[Itinerary, Optional[str], Optional[str]]]:
+    """
+    Zwraca listę:
+      (itinerary, followup_tfs2, followup_tfu2)
+    """
     decoded = ResultDecoder.decode(raw)
-    options: list[tuple[Itinerary, Optional[str]]] = []
+    options: list[tuple[Itinerary, Optional[str], Optional[str]]] = []
 
     def iter_section(section_index: int, itineraries: list[Itinerary]) -> None:
         try:
@@ -308,9 +331,9 @@ def _decode_outbound_options(raw: list) -> list[tuple[Itinerary, Optional[str]]]
         for idx, itinerary in enumerate(itineraries):
             raw_item = None
             if isinstance(raw_section, list) and idx < len(raw_section):
-                raw_item = raw_section[idx]
-            selection_ref = _extract_selection_ref(raw_item if isinstance(raw_item, list) else None)
-            options.append((itinerary, selection_ref))
+                raw_item = raw_section[idx] if isinstance(raw_section[idx], list) else None
+            tfs2, tfu2 = _extract_followup_params_from_raw_item(raw_item)
+            options.append((itinerary, tfs2, tfu2))
 
     iter_section(2, decoded.best)
     iter_section(3, decoded.other)
@@ -318,14 +341,11 @@ def _decode_outbound_options(raw: list) -> list[tuple[Itinerary, Optional[str]]]
 
 
 def _select_outbound(
-    options: list[tuple[Itinerary, Optional[str]]],
+    options: list[tuple[Itinerary, Optional[str], Optional[str]]],
     target_time_minutes: Optional[int],
-) -> tuple[Itinerary, Optional[str]]:
+) -> tuple[Itinerary, Optional[str], Optional[str]]:
     if not options:
         raise RuntimeError("No outbound options available for selection")
-
-    def price_value(itinerary: Itinerary) -> float:
-        return float(itinerary.itinerary_summary.price)
 
     if target_time_minutes is not None:
         return min(
@@ -333,14 +353,39 @@ def _select_outbound(
             key=lambda opt: (
                 abs(_itinerary_departure_minutes(opt[0]) - target_time_minutes),
                 _itinerary_stops(opt[0]),
-                price_value(opt[0]),
+                _safe_price_value(opt[0]),
             ),
         )
 
     return min(
         options,
-        key=lambda opt: (_itinerary_stops(opt[0]), price_value(opt[0])),
+        key=lambda opt: (_itinerary_stops(opt[0]), _safe_price_value(opt[0])),
     )
+
+
+def _fetch_with_mode(
+    params: dict,
+    *,
+    mode: Literal["common", "fallback", "force-fallback", "local", "bright-data"],
+    req_kwargs: dict,
+) -> Response:
+    if mode in {"common", "fallback"}:
+        try:
+            return fetch(params, request_kwargs=req_kwargs)
+        except AssertionError as e:
+            if mode == "fallback":
+                return fallback_playwright_fetch(params, request_kwargs=req_kwargs)
+            raise e
+
+    if mode == "local":
+        from .local_playwright import local_playwright_fetch
+
+        return local_playwright_fetch(params, request_kwargs=req_kwargs)
+
+    if mode == "bright-data":
+        return bright_data_fetch(params, request_kwargs=req_kwargs)
+
+    return fallback_playwright_fetch(params, request_kwargs=req_kwargs)
 
 
 def get_flights_from_filter(
@@ -356,10 +401,11 @@ def get_flights_from_filter(
 ) -> Union[Result, DecodedResult, RoundTripDecodedResult, None]:
     data = filter.as_b64()
 
+    # Listing request (tak jak w przeglądarce po "Search"):
     params = {
         "tfs": data.decode("utf-8"),
         "hl": "en",
-        "tfu": "EgQIABABIgA",
+        "tfu": "KgIIAw",  # w Twoich logach: search ma tfu=KgIIAw
         "curr": currency,
     }
 
@@ -379,79 +425,77 @@ def get_flights_from_filter(
 
     req_kwargs = _merge_binary_cookies(cookies, request_kwargs)
 
-    if mode in {"common", "fallback"}:
-        try:
-            res = fetch(params, request_kwargs=req_kwargs)
-        except AssertionError as e:
-            if mode == "fallback":
-                res = fallback_playwright_fetch(params, request_kwargs=req_kwargs)
-            else:
-                raise e
-    elif mode == "local":
-        from .local_playwright import local_playwright_fetch
-
-        res = local_playwright_fetch(params, request_kwargs=req_kwargs)
-    elif mode == "bright-data":
-        res = bright_data_fetch(params, request_kwargs=req_kwargs)
-    else:
-        res = fallback_playwright_fetch(params, request_kwargs=req_kwargs)
+    # Request #1 (listing)
+    res1 = _fetch_with_mode(params, mode=mode, req_kwargs=req_kwargs)
 
     try:
+        # RT JS flow: listing -> auto-select outbound -> follow-up using extracted tfs2/tfu2
         if data_source == "js" and filter.trip == PB.Trip.ROUND_TRIP:
-            logger.info("Round-trip JS flow: listing outbound options (request #1).")
-            outbound_raw = _extract_js_data(res.text)
-            outbound_result = ResultDecoder.decode(outbound_raw)
+            logger.info("RT JS flow: listing outbound options (request #1).")
+            outbound_raw = _extract_js_data(res1.text)
+            outbound_decoded = ResultDecoder.decode(outbound_raw)
+
             outbound_options = _decode_outbound_options(outbound_raw)
-            missing_refs = sum(1 for _, ref in outbound_options if not ref)
+            missing_tfs2 = sum(1 for _, tfs2, _ in outbound_options if not tfs2)
+            missing_tfu2 = sum(1 for _, _, tfu2 in outbound_options if not tfu2)
             logger.info(
-                "Round-trip JS flow: decoded %d outbound options (%d missing refs).",
+                "RT JS flow: decoded %d outbound options (missing tfs2=%d, missing tfu2=%d).",
                 len(outbound_options),
-                missing_refs,
+                missing_tfs2,
+                missing_tfu2,
             )
+
             target_minutes = _parse_target_time(target_time)
-            selected_itinerary, selected_ref = _select_outbound(outbound_options, target_minutes)
-            if not selected_ref:
-                raise RuntimeError("Selected outbound option missing selection reference.")
-            logger.info("Selected outbound option; issuing follow-up request.")
-            followup_filter = filter.with_selected_outbound(selected_ref)
-            params["tfs"] = followup_filter.as_b64().decode("utf-8")
+            selected_itinerary, followup_tfs2, followup_tfu2 = _select_outbound(outbound_options, target_minutes)
 
-            # Request #2
-            if mode in {"common", "fallback"}:
-                try:
-                    res = fetch(params, request_kwargs=req_kwargs)
-                except AssertionError as e:
-                    if mode == "fallback":
-                        res = fallback_playwright_fetch(params, request_kwargs=req_kwargs)
-                    else:
-                        raise e
-            elif mode == "local":
-                from .local_playwright import local_playwright_fetch
+            if not followup_tfs2 or not followup_tfu2:
+                # To jest sytuacja, gdzie jeszcze nie umiemy wyciągnąć deep-linków.
+                # Wtedy trzeba w decoderze/raw znaleźć właściwą ścieżkę.
+                logger.error(
+                    "Selected outbound missing follow-up params: tfs2=%s tfu2=%s. "
+                    "Update _extract_followup_params_from_raw_item() to match actual raw structure.",
+                    bool(followup_tfs2),
+                    bool(followup_tfu2),
+                )
+                raise RuntimeError("Selected outbound missing follow-up tfs2/tfu2; cannot fetch inbound results.")
 
-                res = local_playwright_fetch(params, request_kwargs=req_kwargs)
-            elif mode == "bright-data":
-                res = bright_data_fetch(params, request_kwargs=req_kwargs)
-            else:
-                res = fallback_playwright_fetch(params, request_kwargs=req_kwargs)
+            logger.info(
+                "Selected outbound; follow-up: tfs2_prefix=%r tfu2_prefix=%r",
+                followup_tfs2[:12],
+                followup_tfu2[:12],
+            )
 
-            inbound_raw = _extract_js_data(res.text)
-            inbound_result = ResultDecoder.decode(inbound_raw)
-            logger.info("Round-trip JS flow: parsed inbound results.")
+            # Request #2 (po kliknięciu wybranego outbound w UI)
+            params2 = params.copy()
+            params2["tfs"] = followup_tfs2
+            params2["tfu"] = followup_tfu2
+
+            res2 = _fetch_with_mode(params2, mode=mode, req_kwargs=req_kwargs)
+
+            inbound_raw = _extract_js_data(res2.text)
+            inbound_decoded = ResultDecoder.decode(inbound_raw)
+
+            logger.info("RT JS flow: parsed inbound results (request #2).")
+
             return RoundTripDecodedResult(
-                outbound=outbound_result,
-                inbound=inbound_result,
-                selected_outbound_ref=selected_ref,
+                outbound=outbound_decoded,
+                inbound=inbound_decoded,
+                selected_outbound_ref=followup_tfs2,  # przechowujemy tfs2 jako ref do debug
                 selected_outbound=selected_itinerary,
             )
 
-        return parse_response(res, data_source)
+        # One-way / HTML flow
+        return parse_response(res1, data_source)
+
     except RuntimeError as e:
         if mode == "fallback":
             return get_flights_from_filter(
                 filter,
+                currency=currency,
                 mode="force-fallback",
-                request_kwargs=req_kwargs,
+                data_source=data_source,
                 cookies=None,
+                request_kwargs=req_kwargs,
                 cookie_consent=cookie_consent,
                 target_time=target_time,
             )
@@ -495,6 +539,7 @@ def get_flights(
 
     return get_flights_from_filter(
         tfs,
+        currency="",
         mode=fetch_mode,
         data_source=data_source,
         cookies=cookies,
