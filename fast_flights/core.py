@@ -3,6 +3,7 @@
 import base64
 import json
 import logging
+import os
 import re
 import urllib.parse
 from datetime import datetime
@@ -33,31 +34,48 @@ STOPS_RE = re.compile(
 )
 TRIP_TYPE_RE = re.compile(r"\b(round trip|one way)\b", re.IGNORECASE)
 
-# Default cookies embedded into the app to help bypass consent gating.
 _DEFAULT_COOKIES = {
     "CONSENT": "PENDING+987",
     "SOCS": "CAESHAgBEhJnd3NfMjAyMzA4MTAtMF9SQzIaAmRlIAEaBgiAo_CmBg",
 }
 _DEFAULT_COOKIES_BYTES = json.dumps(_DEFAULT_COOKIES).encode("utf-8")
 
-# Observed listing tfu for the initial search in browser.
 _TFU_LISTING_DEFAULT = "KgIIAw"
 
-# Follow-up patterns observed in browser:
-# - after selecting outbound, tfs often starts with "CBwQAh"
-# - after selecting outbound, tfu is a longer token often starting with "Cn"
 _TFS2_PREFIXES = ("CBwQAh",)
 _TFU2_PREFIXES = ("Cn",)
 
-# Extract (tfs, tfu) pairs embedded in HTML/JS as query params.
-# Works for both raw "&" and escaped "\u0026".
+# More permissive pair extractor:
+# - handles "&", "\u0026", "&amp;"
+# - handles "\u003d" (escaped '=')
+# - does not require strict separators, only that tfs appears before tfu
 _TFS_TFU_PAIR_RE = re.compile(
-    r"(?:[?&]|\\u0026)tfs=([A-Za-z0-9%_\-]+)(?:[&]|\\u0026)tfu=([A-Za-z0-9%_\-]+)"
+    r"""
+    tfs(?:=|\\u003d)(?P<tfs>[A-Za-z0-9%_\-+/=]{20,})
+    (?:
+        [^A-Za-z0-9%_\-+/=]{0,200}
+    )
+    tfu(?:=|\\u003d)(?P<tfu>[A-Za-z0-9%_\-+/=]{4,})
+    """,
+    re.VERBOSE,
 )
 
-# Extract booking deep link used by some variants (e.g. dumps in output*.txt).
+# Booking tfs can appear in many forms:
+# - full URL
+# - relative path
+# - escaped slashes
+# - plain "booking?tfs="
 _BOOKING_TFS_RE = re.compile(
-    r"/travel/flights/booking\?tfs=([A-Za-z0-9%_\-+/=]{20,})"
+    r"""
+    (?:
+        https?:\/\/[^"' ]+\/travel\/flights\/booking\?tfs=|
+        \/travel\/flights\/booking\?tfs=|
+        travel\/flights\/booking\?tfs=|
+        booking\?tfs=
+    )
+    (?P<tfs>[A-Za-z0-9%_\-+/=]{20,})
+    """,
+    re.VERBOSE,
 )
 
 _B64ISH_RE = re.compile(r"^[A-Za-z0-9\-_+/=]+$")
@@ -74,26 +92,18 @@ def fetch(params: dict, request_kwargs: dict | None = None) -> Response:
 def fetch_booking(tfs: str, request_kwargs: dict | None = None) -> Response:
     client = Client(impersonate="chrome_126", verify=False)
     req_kwargs = request_kwargs.copy() if request_kwargs else {}
-    # Keep the endpoint consistent with what appears in the HTML dumps.
-    url = "https://www.google.com/travel/flights/booking"
-    res = client.get(url, params={"tfs": tfs}, **req_kwargs)
+    res = client.get("https://www.google.com/travel/flights/booking", params={"tfs": tfs}, **req_kwargs)
     assert res.status_code == 200, f"{res.status_code} Result: {res.text_markdown}"
     return res
 
 
 def _merge_binary_cookies(cookies_bytes: bytes | None, request_kwargs: dict | None) -> dict:
-    """Parse binary cookies into request kwargs.
-
-    Supported formats (in order):
-    - JSON bytes -> dict or list of pairs
-    - Pickle bytes -> dict
-    - Raw cookie header bytes -> sets the 'Cookie' header
-    """
+    """Parse binary cookies into request kwargs."""
     req_kwargs = request_kwargs.copy() if request_kwargs else {}
     if not cookies_bytes:
         return req_kwargs
 
-    # Try JSON first
+    # JSON bytes
     try:
         s = cookies_bytes.decode("utf-8")
         parsed = json.loads(s)
@@ -109,7 +119,7 @@ def _merge_binary_cookies(cookies_bytes: bytes | None, request_kwargs: dict | No
     except Exception:
         pass
 
-    # Try pickle
+    # Pickle bytes
     try:
         import pickle
 
@@ -120,7 +130,7 @@ def _merge_binary_cookies(cookies_bytes: bytes | None, request_kwargs: dict | No
     except Exception:
         pass
 
-    # Fallback: treat as raw Cookie header
+    # Raw Cookie header bytes
     try:
         s = cookies_bytes.decode("utf-8")
         headers = req_kwargs.get("headers", {})
@@ -139,9 +149,7 @@ def _parse_duration_minutes(text: str) -> Optional[int]:
     match = DURATION_RE.search(text.strip())
     if not match:
         return None
-    hours = int(match.group("h"))
-    minutes = int(match.group("m"))
-    return hours * 60 + minutes
+    return int(match.group("h")) * 60 + int(match.group("m"))
 
 
 def _parse_stops_text(text: str) -> tuple[Optional[int], Optional[List[str]]]:
@@ -153,9 +161,7 @@ def _parse_stops_text(text: str) -> tuple[Optional[int], Optional[List[str]]]:
     match = STOPS_RE.search(t)
     if not match:
         return None, None
-    count = int(match.group("count"))
-    airports = [x.strip().upper() for x in match.group("airports").split(",")]
-    return count, airports
+    return int(match.group("count")), [x.strip().upper() for x in match.group("airports").split(",")]
 
 
 def _parse_travelimpact_url(url: Optional[str]) -> tuple[Optional[str], Optional[List[Segment]]]:
@@ -192,8 +198,8 @@ def _parse_travelimpact_url(url: Optional[str]) -> tuple[Optional[str], Optional
 
 
 def _find_match(pattern: re.Pattern[str], text: str) -> Optional[str]:
-    match = pattern.search(text)
-    return match.group(0).strip() if match else None
+    m = pattern.search(text)
+    return m.group(0).strip() if m else None
 
 
 def _find_card(node: LexborNode) -> Optional[LexborNode]:
@@ -228,11 +234,11 @@ def _parse_airline_logo_url(card: Optional[LexborNode]) -> Optional[str]:
     if not logo_div:
         return None
     style = logo_div.attributes.get("style", "")
-    match = re.search(
+    m = re.search(
         r"url\((https://www\.gstatic\.com/flights/airline_logos/70px/[^)]+)\)",
         style,
     )
-    return match.group(1) if match else None
+    return m.group(1) if m else None
 
 
 def _extract_js_data(html_text: str) -> list:
@@ -303,7 +309,7 @@ def _safe_price_value(itinerary: Itinerary) -> float:
 
 
 def _select_outbound(itineraries: list[Itinerary], target_time_minutes: Optional[int]) -> Itinerary:
-    """Select outbound by target time; if missing, prefer nonstop then cheapest."""
+    """Select outbound by target time; otherwise prefer nonstop then cheapest."""
     if not itineraries:
         raise RuntimeError("No outbound options available for selection")
 
@@ -336,25 +342,28 @@ def _extract_followup_pairs_from_html(html: str) -> list[tuple[str, str]]:
     """Extract follow-up (tfs2, tfu2) pairs from HTML."""
     pairs: list[tuple[str, str]] = []
     for m in _TFS_TFU_PAIR_RE.finditer(html):
-        tfs = urllib.parse.unquote(m.group(1))
-        tfu = urllib.parse.unquote(m.group(2))
+        tfs = urllib.parse.unquote(m.group("tfs"))
+        tfu = urllib.parse.unquote(m.group("tfu"))
+
         if not tfs or not tfu:
             continue
         if " " in tfs or " " in tfu:
             continue
         if not _B64ISH_RE.fullmatch(tfs) or not _B64ISH_RE.fullmatch(tfu):
             continue
+
         if tfs.startswith(_TFS2_PREFIXES) and tfu.startswith(_TFU2_PREFIXES) and len(tfu) >= 40:
             pairs.append((tfs, tfu))
+
     return pairs
 
 
 def _extract_booking_tfs_from_html(html: str) -> Optional[str]:
-    """Extract booking?tfs=... from HTML dumps."""
+    """Extract booking?tfs=... if present."""
     m = _BOOKING_TFS_RE.search(html)
     if not m:
         return None
-    return urllib.parse.unquote(m.group(1))
+    return urllib.parse.unquote(m.group("tfs"))
 
 
 def _score_tfs2_match(selected: Itinerary, tfs2: str) -> int:
@@ -366,7 +375,6 @@ def _score_tfs2_match(selected: Itinerary, tfs2: str) -> int:
 
     score = 0
 
-    # Airports in selected outbound
     for code in {getattr(selected, "departure_airport", None), getattr(selected, "arrival_airport", None)}:
         if isinstance(code, str) and code and code.encode("utf-8") in b:
             score += 3
@@ -400,6 +408,32 @@ def _pick_best_followup_pair(selected: Itinerary, pairs: list[tuple[str, str]]) 
             best_score = s
             best_tfs, best_tfu = tfs2, tfu2
     return best_tfs, best_tfu, best_score
+
+
+def _dump_listing_debug(html: str) -> None:
+    """Dump listing HTML/snippets to help diagnose missing follow-up tokens."""
+    if os.getenv("FAST_FLIGHTS_DUMP_HTML", "1") not in ("1", "true", "TRUE", "yes", "YES"):
+        return
+
+    try:
+        with open("/tmp/fast_flights_listing.html", "w", encoding="utf-8") as f:
+            f.write(html)
+    except Exception:
+        pass
+
+    # Create a small snippet around any "tfs" occurrences.
+    try:
+        idx = html.find("tfs")
+        if idx == -1:
+            snippet = html[:2000]
+        else:
+            start = max(0, idx - 1000)
+            end = min(len(html), idx + 2000)
+            snippet = html[start:end]
+        with open("/tmp/fast_flights_listing_snippet.txt", "w", encoding="utf-8") as f:
+            f.write(snippet)
+    except Exception:
+        pass
 
 
 def _fetch_with_mode(
@@ -468,7 +502,6 @@ def get_flights_from_filter(
     res1 = _fetch_with_mode(params, mode=mode, req_kwargs=req_kwargs)
 
     try:
-        # Round-trip JS flow: listing -> select outbound -> follow-up -> inbound
         if data_source == "js" and filter.trip == PB.Trip.ROUND_TRIP:
             logger.info("RT JS flow: listing outbound options (request #1).")
             outbound_raw = _extract_js_data(res1.text)
@@ -483,9 +516,9 @@ def get_flights_from_filter(
             target_minutes = _parse_target_time(target_time)
             selected_outbound = _select_outbound(outbound_itineraries, target_minutes)
 
-            # Path A (preferred): find follow-up (tfs2, tfu2) pairs embedded in HTML.
+            # Path A: follow-up pairs in listing HTML
             pairs = _extract_followup_pairs_from_html(res1.text)
-            logger.info("RT JS flow: follow-up pairs found in HTML=%d.", len(pairs))
+            logger.info("RT JS flow: follow-up pairs found in listing HTML=%d.", len(pairs))
 
             tfs2, tfu2, score = _pick_best_followup_pair(selected_outbound, pairs)
             logger.info("RT JS flow: best follow-up match score=%d.", score)
@@ -493,12 +526,7 @@ def get_flights_from_filter(
             if tfs2 and tfu2 and score >= 6:
                 logger.info("RT JS flow: issuing follow-up request #2 via flights endpoint.")
                 res2 = _fetch_with_mode(
-                    {
-                        "tfs": tfs2,
-                        "hl": params["hl"],
-                        "tfu": tfu2,
-                        "curr": params["curr"],
-                    },
+                    {"tfs": tfs2, "hl": params["hl"], "tfu": tfu2, "curr": params["curr"]},
                     mode=mode,
                     req_kwargs=req_kwargs,
                 )
@@ -512,13 +540,12 @@ def get_flights_from_filter(
                     selected_outbound=selected_outbound,
                 )
 
-            # Path B (fallback): booking deep link appears without tfu in some variants/dumps.
+            # Path B: booking deep link
             booking_tfs = _extract_booking_tfs_from_html(res1.text)
             if booking_tfs:
-                logger.warning("RT JS flow: no usable (tfs2, tfu2) pair; falling back to booking?tfs flow.")
+                logger.warning("RT JS flow: no follow-up pairs in listing; falling back to booking?tfs flow.")
                 resb = fetch_booking(booking_tfs, request_kwargs=req_kwargs)
 
-                # Try to extract follow-up pairs from booking HTML (sometimes present there).
                 pairs_b = _extract_followup_pairs_from_html(resb.text)
                 logger.info("RT JS flow: follow-up pairs found in booking HTML=%d.", len(pairs_b))
 
@@ -528,12 +555,7 @@ def get_flights_from_filter(
                 if tfs2b and tfu2b and score_b >= 6:
                     logger.info("RT JS flow: issuing follow-up request #2 via flights endpoint (from booking page).")
                     res2 = _fetch_with_mode(
-                        {
-                            "tfs": tfs2b,
-                            "hl": params["hl"],
-                            "tfu": tfu2b,
-                            "curr": params["curr"],
-                        },
+                        {"tfs": tfs2b, "hl": params["hl"], "tfu": tfu2b, "curr": params["curr"]},
                         mode=mode,
                         req_kwargs=req_kwargs,
                     )
@@ -547,30 +569,24 @@ def get_flights_from_filter(
                         selected_outbound=selected_outbound,
                     )
 
-                # If booking page itself contains script.ds:1, decode and return it as inbound context.
-                try:
-                    inbound_raw = _extract_js_data(resb.text)
-                    inbound_decoded = ResultDecoder.decode(inbound_raw)
-                    logger.warning(
-                        "RT JS flow: using booking page JS decode as inbound (no explicit follow-up pair found)."
-                    )
-                    return RoundTripDecodedResult(
-                        outbound=outbound_decoded,
-                        inbound=inbound_decoded,
-                        selected_outbound_ref=booking_tfs,
-                        selected_outbound=selected_outbound,
-                    )
-                except Exception as ex:
-                    logger.error("RT JS flow: booking page did not contain usable JS data: %r", ex)
-                    raise RuntimeError(
-                        "Round-trip follow-up not found: no (tfs2, tfu2) pairs and booking flow unavailable."
-                    )
+                # Last resort: decode booking page ds:1 (if present)
+                inbound_raw = _extract_js_data(resb.text)
+                inbound_decoded = ResultDecoder.decode(inbound_raw)
+                logger.warning("RT JS flow: using booking page JS decode as inbound context.")
+                return RoundTripDecodedResult(
+                    outbound=outbound_decoded,
+                    inbound=inbound_decoded,
+                    selected_outbound_ref=booking_tfs,
+                    selected_outbound=selected_outbound,
+                )
 
+            # No follow-up found; dump listing for analysis.
+            _dump_listing_debug(res1.text)
             raise RuntimeError(
-                "Round-trip follow-up not found: no (tfs2, tfu2) pairs in listing HTML and no booking?tfs deep link."
+                "Round-trip follow-up not found: no (tfs2, tfu2) pairs and no booking?tfs deep link in listing HTML. "
+                "Dumped listing HTML/snippet to /tmp/fast_flights_listing.html and /tmp/fast_flights_listing_snippet.txt."
             )
 
-        # Non-RT or HTML flow
         return parse_response(res1, data_source)
 
     except RuntimeError as e:
