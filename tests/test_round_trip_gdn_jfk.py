@@ -91,24 +91,17 @@ def test_round_trip_gdn_to_jfk_real_time() -> None:
         seat="economy",
         passengers=Passengers(adults=1),
         fetch_mode="common",
-        data_source="js",              # <-- KLUCZ
-        target_time="14:35",           # opcjonalne, ale zgodne z Twoją logiką selekcji
+        data_source="js",
+        target_time="14:35",
     )
-
+    
     assert result is not None
-
-    # Dla RT+JS spodziewasz się RoundTripDecodedResult
-    assert hasattr(result, "outbound") and hasattr(result, "inbound"), repr(result)
-
-    logger.debug("[RT] selected_outbound_ref prefix=%r", getattr(result, "selected_outbound_ref", "")[:40])
-    logger.debug("[RT] selected_outbound=%r", getattr(result, "selected_outbound", None))
-
-    outbound = result.outbound
-    inbound = result.inbound
-
-    # To zależy od Twojego decoder'a: często są listy .best/.other (nie .flights)
-    logger.debug("[OUTBOUND] best=%d other=%d", len(getattr(outbound, "best", [])), len(getattr(outbound, "other", [])))
-    logger.debug("[INBOUND]  best=%d other=%d", len(getattr(inbound, "best", [])), len(getattr(inbound, "other", [])))
-
-    assert (getattr(outbound, "best", []) or getattr(outbound, "other", [])), "No outbound options decoded"
-    assert (getattr(inbound, "best", []) or getattr(inbound, "other", [])), "No inbound options decoded (follow-up failed)"
+    assert hasattr(result, "outbound") and hasattr(result, "inbound")
+    
+    # sprawdź, że inbound faktycznie ma itineraria startujące z JFK
+    in_best = getattr(result.inbound, "best", [])
+    in_other = getattr(result.inbound, "other", [])
+    assert in_best or in_other, "No inbound options decoded"
+    
+    sample = (in_best[0] if in_best else in_other[0])
+    assert getattr(sample, "departure_airport", None) == "JFK", f"Expected inbound departure JFK, got {getattr(sample, 'departure_airport', None)!r}"
