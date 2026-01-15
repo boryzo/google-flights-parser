@@ -85,59 +85,30 @@ def test_round_trip_gdn_to_jfk_real_time() -> None:
         FlightData(date="2026-06-27", from_airport="JFK", to_airport="GDN"),
     ]
 
-    logger.debug(
-        "[TEST] get_flights request trip=%s seat=%s adults=%d fetch_mode=%s flight_data=%s",
-        "round-trip",
-        "economy",
-        1,
-        "common",
-        [
-            {"date": fd.date, "from": fd.from_airport, "to": fd.to_airport}
-            for fd in flight_data
-        ],
-    )
-
     result = get_flights(
         flight_data=flight_data,
         trip="round-trip",
         seat="economy",
         passengers=Passengers(adults=1),
         fetch_mode="common",
+        data_source="js",              # <-- KLUCZ
+        target_time="14:35",           # opcjonalne, ale zgodne z Twoją logiką selekcji
     )
 
-    logger.debug("[TEST] get_flights returned result=%r", result)
+    assert result is not None
 
-    assert result is not None, "Expected a Result from get_flights()"
-    assert result.flights, "Expected at least one flight option"
+    # Dla RT+JS spodziewasz się RoundTripDecodedResult
+    assert hasattr(result, "outbound") and hasattr(result, "inbound"), repr(result)
 
-    _log_flights_table(result.flights)
+    logger.debug("[RT] selected_outbound_ref prefix=%r", getattr(result, "selected_outbound_ref", "")[:40])
+    logger.debug("[RT] selected_outbound=%r", getattr(result, "selected_outbound", None))
 
-    departures_raw = [getattr(f, "departure", "") for f in result.flights]
-    logger.debug("[TEST] departures_raw_count=%d sample=%r", len(departures_raw), departures_raw[:5])
+    outbound = result.outbound
+    inbound = result.inbound
 
-    departure_times = _extract_times(departures_raw)
-    logger.debug("[TEST] departure_times_extracted=%s", sorted(departure_times))
+    # To zależy od Twojego decoder'a: często są listy .best/.other (nie .flights)
+    logger.debug("[OUTBOUND] best=%d other=%d", len(getattr(outbound, "best", [])), len(getattr(outbound, "other", [])))
+    logger.debug("[INBOUND]  best=%d other=%d", len(getattr(inbound, "best", [])), len(getattr(inbound, "other", [])))
 
-    expected_outbound_times = {"2:35", "14:35"}
-    expected_return_times = {"9:50", "21:50"}
-
-    outbound_hit = departure_times & expected_outbound_times
-    return_hit = departure_times & expected_return_times
-
-    logger.debug(
-        "[ASSERT] expected_outbound=%s expected_return=%s outbound_hit=%s return_hit=%s",
-        sorted(expected_outbound_times),
-        sorted(expected_return_times),
-        sorted(outbound_hit),
-        sorted(return_hit),
-    )
-
-    # If you re-enable assertions, keep the debug context:
-    # assert outbound_hit, (
-    #     "Expected to find a departure around 14:35 in the results. "
-    #     f"Seen times: {sorted(departure_times)}"
-    # )
-    # assert return_hit, (
-    #     "Expected to find a departure around 21:50 in the results. "
-    #     f"Seen times: {sorted(departure_times)}"
-    # )
+    assert (getattr(outbound, "best", []) or getattr(outbound, "other", [])), "No outbound options decoded"
+    assert (getattr(inbound, "best", []) or getattr(inbound, "other", [])), "No inbound options decoded (follow-up failed)"
