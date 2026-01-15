@@ -119,6 +119,7 @@ class Itinerary:
     departure_time: Tuple[int, int]
     arrival_time: Tuple[int, int]
     itinerary_summary: ItinerarySummary
+    selection_ref: Optional[str] = None
 
 @dataclass
 class DecodedResult:
@@ -212,7 +213,15 @@ class ItineraryDecoder(Decoder):
     @classmethod
     @override
     def decode(cls, root: Union[list, NLData]) -> List[Itinerary]:
-        return [Itinerary(**cls.decode_el(NLData(el))) for el in root]
+        itineraries: List[Itinerary] = []
+        for el in root:
+            decoded = dict(cls.decode_el(NLData(el)))
+            selection_ref = None
+            if isinstance(el, list) and len(el) > 2 and isinstance(el[2], str):
+                selection_ref = el[2]
+            decoded["selection_ref"] = selection_ref
+            itineraries.append(Itinerary(**decoded))
+        return itineraries
 
 
 class ResultDecoder(Decoder):

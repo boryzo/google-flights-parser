@@ -717,6 +717,20 @@ def get_flights_from_filter(
                     selected_outbound=selected_outbound,
                 )
 
+            selected_ref = getattr(selected_outbound, "selection_ref", None)
+            if selected_ref:
+                logger.info("RT JS flow: using selected outbound ref for follow-up request #2.")
+                selected_tfs = filter.with_selected_outbound(selected_ref).as_b64().decode("utf-8")
+                inbound_decoded = _decode_followup_from_flights(selected_tfs)
+                if inbound_decoded:
+                    logger.info("RT JS flow: follow-up decode succeeded via selected outbound ref.")
+                    return RoundTripDecodedResult(
+                        outbound=outbound_decoded,
+                        inbound=inbound_decoded,
+                        selected_outbound_ref=selected_ref,
+                        selected_outbound=selected_outbound,
+                    )
+
             # Path B: explicit booking deep link present in listing HTML
             booking_tfs = _extract_booking_tfs_from_html(res1.text)
             if not booking_tfs:
