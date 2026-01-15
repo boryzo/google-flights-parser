@@ -39,6 +39,7 @@ def test_round_trip_gdn_to_jfk_real_time() -> None:
     assert result.flights, "Expected at least one flight option"
 
     departure_times = _extract_times([flight.departure for flight in result.flights])
+    print(departure_times)
 
     expected_outbound_times = {"2:35", "14:35"}
     expected_return_times = {"9:50", "21:50"}
