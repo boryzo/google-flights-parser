@@ -1,4 +1,5 @@
 import json
+import logging
 import re
 from datetime import datetime
 from typing import List, Literal, Optional, Union
@@ -6,9 +7,10 @@ from urllib.parse import parse_qs, urlparse
 
 from selectolax.lexbor import LexborHTMLParser, LexborNode
 
-from .decoder import DecodedResult, ResultDecoder
+from .decoder import DecodedResult, Itinerary, ResultDecoder, RoundTripDecodedResult
 from .schema import Flight, Result, Segment
 from .flights_impl import FlightData, Passengers
+from . import flights_pb2 as PB
 from .filter import TFSData
 from .fallback_playwright import fallback_playwright_fetch
 from .bright_data_fetch import bright_data_fetch
@@ -16,6 +18,7 @@ from .primp import Client, Response
 
 
 DataSource = Literal['html', 'js']
+logger = logging.getLogger(__name__)
 
 SEGMENT_RE = re.compile(
     r"^(?P<orig>[A-Z]{3})-(?P<dest>[A-Z]{3})-(?P<carrier>[A-Z0-9]{2,3})-(?P<flight>\d{1,5})-(?P<date>\d{8})$"
@@ -205,6 +208,116 @@ def _parse_airline_logo_url(card: Optional[LexborNode]) -> Optional[str]:
     return match.group(1) if match else None
 
 
+def _extract_js_data(text: str) -> list:
+    parser = LexborHTMLParser(text)
+    script = parser.css_first(r'script.ds\:1')
+    if not script:
+        raise RuntimeError("Malformed js data, cannot find script data")
+    match = re.search(r'^.*?\{.*?data:(\[.*\]).*}', script.text())
+    if not match:
+        raise RuntimeError("Malformed js data, cannot find script data")
+    return json.loads(match.group(1))
+
+
+def _parse_target_time(target_time: Optional[str]) -> Optional[int]:
+    if not target_time:
+        return None
+    match = re.match(r"^(?P<h>\d{1,2}):(?P<m>\d{2})$", target_time.strip())
+    if not match:
+        raise ValueError(f"target_time should be HH:MM, got {target_time!r}")
+    hours = int(match.group("h"))
+    minutes = int(match.group("m"))
+    if not (0 <= hours <= 23 and 0 <= minutes <= 59):
+        raise ValueError(f"target_time should be HH:MM, got {target_time!r}")
+    return hours * 60 + minutes
+
+
+def _itinerary_departure_minutes(itinerary: Itinerary) -> int:
+    hours, minutes = itinerary.departure_time
+    return hours * 60 + minutes
+
+
+def _itinerary_stops(itinerary: Itinerary) -> int:
+    return max(0, len(itinerary.flights) - 1)
+
+
+def _extract_selection_ref(itinerary_raw: Optional[list]) -> Optional[str]:
+    if not itinerary_raw:
+        return None
+    summary_b64 = None
+    if (
+        len(itinerary_raw) > 1
+        and isinstance(itinerary_raw[1], list)
+        and len(itinerary_raw[1]) > 1
+        and isinstance(itinerary_raw[1][1], str)
+    ):
+        summary_b64 = itinerary_raw[1][1]
+
+    candidates: list[str] = []
+
+    def walk(value: object) -> None:
+        if isinstance(value, list):
+            for item in value:
+                walk(item)
+        elif isinstance(value, str):
+            candidates.append(value)
+
+    walk(itinerary_raw)
+    for candidate in candidates:
+        if candidate == summary_b64:
+            continue
+        if len(candidate) >= 16:
+            return candidate
+    return None
+
+
+def _decode_outbound_options(raw: list) -> list[tuple[Itinerary, Optional[str]]]:
+    decoded = ResultDecoder.decode(raw)
+    options: list[tuple[Itinerary, Optional[str]]] = []
+
+    def iter_section(section_index: int, itineraries: list[Itinerary]) -> None:
+        try:
+            raw_section = raw[section_index][0]
+        except (IndexError, TypeError):
+            raw_section = []
+        for idx, itinerary in enumerate(itineraries):
+            raw_item = None
+            if isinstance(raw_section, list) and idx < len(raw_section):
+                raw_item = raw_section[idx]
+            selection_ref = _extract_selection_ref(raw_item if isinstance(raw_item, list) else None)
+            options.append((itinerary, selection_ref))
+
+    iter_section(2, decoded.best)
+    iter_section(3, decoded.other)
+    return options
+
+
+def _select_outbound(
+    options: list[tuple[Itinerary, Optional[str]]],
+    target_time_minutes: Optional[int],
+) -> tuple[Itinerary, Optional[str]]:
+    if not options:
+        raise RuntimeError("No outbound options available for selection")
+
+    def price_value(itinerary: Itinerary) -> float:
+        return float(itinerary.itinerary_summary.price)
+
+    if target_time_minutes is not None:
+        return min(
+            options,
+            key=lambda opt: (
+                abs(_itinerary_departure_minutes(opt[0]) - target_time_minutes),
+                _itinerary_stops(opt[0]),
+                price_value(opt[0]),
+            ),
+        )
+
+    return min(
+        options,
+        key=lambda opt: (_itinerary_stops(opt[0]), price_value(opt[0])),
+    )
+
+
 def get_flights_from_filter(
     filter: TFSData,
     currency: str = "",
@@ -214,7 +327,8 @@ def get_flights_from_filter(
     cookies: bytes | None = None,
     request_kwargs: dict | None = None,
     cookie_consent: bool = True,
-) -> Union[Result, DecodedResult, None]:
+    target_time: Optional[str] = None,
+) -> Union[Result, DecodedResult, RoundTripDecodedResult, None]:
     data = filter.as_b64()
 
     params = {
@@ -260,10 +374,61 @@ def get_flights_from_filter(
         res = fallback_playwright_fetch(params, request_kwargs=req_kwargs)
 
     try:
+        if data_source == "js" and filter.trip == PB.Trip.ROUND_TRIP:
+            logger.info("Round-trip JS flow: listing outbound options.")
+            outbound_raw = _extract_js_data(res.text)
+            outbound_result = ResultDecoder.decode(outbound_raw)
+            outbound_options = _decode_outbound_options(outbound_raw)
+            missing_refs = sum(1 for _, ref in outbound_options if not ref)
+            logger.info(
+                "Round-trip JS flow: decoded %d outbound options (%d missing refs).",
+                len(outbound_options),
+                missing_refs,
+            )
+            target_minutes = _parse_target_time(target_time)
+            selected_itinerary, selected_ref = _select_outbound(outbound_options, target_minutes)
+            if not selected_ref:
+                raise RuntimeError("Selected outbound option missing selection reference.")
+            logger.info("Selected outbound option; issuing follow-up request.")
+            followup_filter = filter.with_selected_outbound(selected_ref)
+            params["tfs"] = followup_filter.as_b64().decode("utf-8")
+            if mode in {"common", "fallback"}:
+                try:
+                    res = fetch(params, request_kwargs=req_kwargs)
+                except AssertionError as e:
+                    if mode == "fallback":
+                        res = fallback_playwright_fetch(params, request_kwargs=req_kwargs)
+                    else:
+                        raise e
+            elif mode == "local":
+                from .local_playwright import local_playwright_fetch
+
+                res = local_playwright_fetch(params, request_kwargs=req_kwargs)
+            elif mode == "bright-data":
+                res = bright_data_fetch(params, request_kwargs=req_kwargs)
+            else:
+                res = fallback_playwright_fetch(params, request_kwargs=req_kwargs)
+
+            inbound_raw = _extract_js_data(res.text)
+            inbound_result = ResultDecoder.decode(inbound_raw)
+            logger.info("Round-trip JS flow: parsed inbound results.")
+            return RoundTripDecodedResult(
+                outbound=outbound_result,
+                inbound=inbound_result,
+                selected_outbound_ref=selected_ref,
+                selected_outbound=selected_itinerary,
+            )
         return parse_response(res, data_source)
     except RuntimeError as e:
         if mode == "fallback":
-            return get_flights_from_filter(filter, mode="force-fallback", request_kwargs=req_kwargs, cookies=None, cookie_consent=cookie_consent)
+            return get_flights_from_filter(
+                filter,
+                mode="force-fallback",
+                request_kwargs=req_kwargs,
+                cookies=None,
+                cookie_consent=cookie_consent,
+                target_time=target_time,
+            )
         raise e
 
 
@@ -285,7 +450,8 @@ def get_flights(
     cookies: bytes | None = None,
     request_kwargs: dict | None = None,
     cookie_consent: bool = True,
-) -> Union[Result, DecodedResult, None]:
+    target_time: Optional[str] = None,
+) -> Union[Result, DecodedResult, RoundTripDecodedResult, None]:
     # If the caller didn't supply a Passengers object, build one from the
     # convenience counters. Default to 1 adult when no adults count provided
     # (matches previous typical usage where at least one adult is expected).
@@ -313,6 +479,7 @@ def get_flights(
         cookies=cookies,
         request_kwargs=request_kwargs,
         cookie_consent=cookie_consent,
+        target_time=target_time,
     )
 
 
@@ -335,16 +502,11 @@ def parse_response(
     def safe(n: Optional[LexborNode]):
         return n or blank
 
-    parser = LexborHTMLParser(r.text)
-
     if data_source == 'js':
-        script = parser.css_first(r'script.ds\:1').text()
-
-        match = re.search(r'^.*?\{.*?data:(\[.*\]).*}', script)
-        assert match, 'Malformed js data, cannot find script data'
-        data = json.loads(match.group(1))
+        data = _extract_js_data(r.text)
         return ResultDecoder.decode(data) if data is not None else None
 
+    parser = LexborHTMLParser(r.text)
     flights = []
 
     for i, fl in enumerate(parser.css('div[jsname="IWWDBc"], div[jsname="YdtKid"]')):

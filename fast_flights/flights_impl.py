@@ -12,6 +12,10 @@ if TYPE_CHECKING:
 
 AIRLINE_ALLIANCES = ["SKYTEAM", "STAR_ALLIANCE", "ONEWORLD"]
 
+def debug_info_fields() -> None:
+    """Print PB.Info descriptor fields for debugging."""
+    print(PB.Info.DESCRIPTOR.fields)
+
 class FlightData:
     """Represents flight data.
 
@@ -129,12 +133,14 @@ class TFSData:
         trip: PB.Trip,  # type: ignore
         passengers: Passengers,
         max_stops: Optional[int] = None,  # Add max_stops to the constructor
+        selected_outbound_ref: Optional[Union[str, bytes]] = None,
     ):
         self.flight_data = flight_data
         self.seat = seat
         self.trip = trip
         self.passengers = passengers
         self.max_stops = max_stops  # Store max_stops
+        self.selected_outbound_ref = selected_outbound_ref
 
     def pb(self) -> PB.Info:  # type: ignore
         info = PB.Info()
@@ -150,6 +156,12 @@ class TFSData:
         if self.max_stops is not None:
             for flight in info.data:
                 flight.max_stops = self.max_stops
+
+        if self.selected_outbound_ref is not None:
+            if isinstance(self.selected_outbound_ref, bytes):
+                info.selected_outbound_ref = self.selected_outbound_ref.decode("utf-8")
+            else:
+                info.selected_outbound_ref = self.selected_outbound_ref
 
         return info
 
@@ -167,6 +179,7 @@ class TFSData:
         passengers: Passengers,
         seat: Literal["economy", "premium-economy", "business", "first"],
         max_stops: Optional[int] = None,  # Add max_stops to the method signature
+        selected_outbound_ref: Optional[Union[str, bytes]] = None,
     ):
         """Use ``?tfs=`` from an interface.
 
@@ -194,11 +207,27 @@ class TFSData:
             seat=seat_t,
             trip=trip_t,
             passengers=passengers,
-            max_stops=max_stops  # Pass max_stops into TFSData
+            max_stops=max_stops,  # Pass max_stops into TFSData
+            selected_outbound_ref=selected_outbound_ref,
+        )
+
+    def with_selected_outbound(self, ref: Union[str, bytes]) -> "TFSData":
+        return TFSData(
+            flight_data=self.flight_data,
+            seat=self.seat,
+            trip=self.trip,
+            passengers=self.passengers,
+            max_stops=self.max_stops,
+            selected_outbound_ref=ref,
         )
 
     def __repr__(self) -> str:
-        return f"TFSData(flight_data={self.flight_data!r}, max_stops={self.max_stops!r})"
+        return (
+            "TFSData("
+            f"flight_data={self.flight_data!r}, "
+            f"max_stops={self.max_stops!r}, "
+            f"selected_outbound_ref={self.selected_outbound_ref!r})"
+        )
 
 @dataclass
 class ItinerarySummary:

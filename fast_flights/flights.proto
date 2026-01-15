@@ -40,6 +40,7 @@ message Info {
   Seat seat = 9;
   repeated Passenger passengers = 8;
   Trip trip = 19;
+  string selected_outbound_ref = 20;
 }
 
 message Price {
