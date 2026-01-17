@@ -2,8 +2,8 @@ name: round-trip-flight-test
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "0 6 * * *"
+  # schedule:
+  #   - cron: "0 6 * * *"
 
 jobs:
   flight-rt-test:
