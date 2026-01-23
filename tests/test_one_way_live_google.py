@@ -14,6 +14,15 @@ ONE_WAY_ROUTES = [
     ("FRA", "MUC"),
     ("LHR", "JFK"),
 ]
+EXPECTED_AIRLINES = {
+    ("GDN", "LTN"): "W6",
+    ("GDN", "WAW"): "LO",
+    ("GDN", "MAD"): "W6",
+}
+
+FIXED_ONE_WAY_CASES = [
+    ("GDN", "MAD", "2026-06-03"),
+]
 
 OUTBOUND_DAYS = int(os.getenv("OW_LIVE_OUTBOUND_DAYS", "60"))
 LOG_LIMIT = int(os.getenv("OW_LIVE_LOG_LIMIT", "6"))
@@ -81,6 +90,19 @@ def _assert_has_complete_details(decoded, dep_airport: str, arr_airport: str, la
             return itinerary
 
     raise AssertionError(f"No {label} itinerary with full details for {dep_airport}->{arr_airport}")
+
+
+def _expected_airline(origin: str, destination: str) -> str | None:
+    return EXPECTED_AIRLINES.get((origin, destination)) or EXPECTED_AIRLINES.get((destination, origin))
+
+
+def _assert_itinerary_has_airline(itinerary, expected: str, label: str) -> None:
+    flights = getattr(itinerary, "flights", None) or []
+    if not flights:
+        raise AssertionError(f"{label} has no flights to verify airline")
+    if not any(getattr(f, "airline", None) == expected for f in flights):
+        found = [getattr(f, "airline", None) for f in flights]
+        raise AssertionError(f"{label} expected airline {expected}, found {found}")
 
 
 def _log_itineraries(decoded, label: str) -> None:
@@ -178,6 +200,9 @@ def test_one_way_live_google_flights(origin: str, destination: str, record_prope
         try:
             assert result is not None
             itinerary = _assert_has_complete_details(result, origin, destination, "one-way")
+            expected_airline = _expected_airline(origin, destination)
+            if expected_airline:
+                _assert_itinerary_has_airline(itinerary, expected_airline, "one-way")
             record_property("one_way_details", _format_itinerary_details(itinerary, "one-way"))
             logger.info(_format_itinerary_details(itinerary, "one-way"))
         except AssertionError as err:
@@ -199,3 +224,30 @@ def test_one_way_live_google_flights(origin: str, destination: str, record_prope
         raise last_error
 
     raise AssertionError(f"OW live test: {origin}->{destination} had no successful attempts")
+
+
+@pytest.mark.parametrize("origin,destination,depart_date", FIXED_ONE_WAY_CASES)
+def test_one_way_live_google_fixed_date(origin: str, destination: str, depart_date: str, record_property) -> None:
+    _configure_test_logging()
+
+    flight_data = [
+        FlightData(date=depart_date, from_airport=origin, to_airport=destination),
+    ]
+
+    result = get_flights(
+        flight_data=flight_data,
+        trip="one-way",
+        seat="economy",
+        passengers=Passengers(adults=1),
+        fetch_mode="common",
+        data_source="js",
+        target_time="12:00",
+    )
+
+    assert result is not None
+    itinerary = _assert_has_complete_details(result, origin, destination, "one-way")
+    expected_airline = _expected_airline(origin, destination)
+    if expected_airline:
+        _assert_itinerary_has_airline(itinerary, expected_airline, "one-way")
+    record_property("one_way_details", _format_itinerary_details(itinerary, "one-way"))
+    logger.info(_format_itinerary_details(itinerary, "one-way"))

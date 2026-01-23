@@ -138,6 +138,7 @@ class RoundTripDecodedResult:
     inbound: DecodedResult
     selected_outbound_ref: str
     selected_outbound: Itinerary
+    debug: Optional[dict] = None
 
 class CodeshareDecoder(Decoder):
     AIRLINE_CODE: DecoderKey[AirlineCode] = DecoderKey([0])

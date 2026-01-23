@@ -5,7 +5,14 @@ def get_cookies_class():
 
 from .core import get_flights_from_filter, get_flights
 from .filter import create_filter
-from .flights_impl import Airport, FlightData, Passengers, TFSData
+from .flights_impl import (
+    Airport,
+    FlightData,
+    Passengers,
+    TFSData,
+    segments_from_tfs,
+    build_tfs_with_segments,
+)
 from .schema import Flight, Result
 from .search import search_airport
 
@@ -15,6 +22,8 @@ __all__ = [
     "create_filter",
     "FlightData",
     "Passengers",
+    "segments_from_tfs",
+    "build_tfs_with_segments",
     "get_flights_from_filter",
     "Result",
     "Flight",

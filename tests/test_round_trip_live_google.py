@@ -2,6 +2,7 @@ import logging
 import os
 import re
 import shutil
+import json
 from datetime import date, timedelta
 from typing import Iterable
 
@@ -11,6 +12,7 @@ from fast_flights import FlightData, Passengers, get_flights
 from fast_flights import core
 
 TIME_RE = re.compile(r"\b\d{1,2}:\d{2}\b")
+IATA_RE = re.compile(r"^[A-Z]{3}$")
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +24,10 @@ LIVE_ROUTES = [
     ("POZ", "JFK"),
     ("WRO", "BKK"),
 ]
+EXPECTED_AIRLINES = {
+    ("GDN", "LTN"): "W6",
+    ("GDN", "WAW"): "LO",
+}
 
 OUTBOUND_DAYS = int(os.getenv("RT_LIVE_OUTBOUND_DAYS", "60"))
 RETURN_GAP_DAYS = int(os.getenv("RT_LIVE_RETURN_GAP_DAYS", "7"))
@@ -168,6 +174,19 @@ def _assert_leg_has_complete_details(decoded, dep_airport: str, arr_airport: str
     raise AssertionError(f"No {label} itinerary with full details for {dep_airport}->{arr_airport}")
 
 
+def _expected_airline(origin: str, destination: str) -> str | None:
+    return EXPECTED_AIRLINES.get((origin, destination)) or EXPECTED_AIRLINES.get((destination, origin))
+
+
+def _assert_itinerary_has_airline(itinerary, expected: str, label: str) -> None:
+    flights = getattr(itinerary, "flights", None) or []
+    if not flights:
+        raise AssertionError(f"{label} has no flights to verify airline")
+    if not any(getattr(f, "airline", None) == expected for f in flights):
+        found = [getattr(f, "airline", None) for f in flights]
+        raise AssertionError(f"{label} expected airline {expected}, found {found}")
+
+
 def _log_itineraries(decoded, label: str) -> None:
     if not decoded:
         logger.debug("[RT][%s] no decoded result", label)
@@ -276,8 +295,27 @@ def test_round_trip_live_google_flights(origin: str, destination: str, record_pr
         try:
             assert isinstance(result, core.RoundTripDecodedResult)
             assert result is not None
-            outbound = _assert_leg_has_complete_details(result.outbound, origin, destination, "outbound")
+            selected_outbound = getattr(result, "selected_outbound", None)
+            if selected_outbound and _has_complete_flight_details(selected_outbound, origin, destination):
+                outbound = selected_outbound
+            else:
+                outbound = _assert_leg_has_complete_details(result.outbound, origin, destination, "outbound")
             inbound = _assert_leg_has_complete_details(result.inbound, destination, origin, "inbound")
+            rt_debug = getattr(result, "debug", None)
+            if rt_debug is not None:
+                record_property("rt_debug", json.dumps(rt_debug, default=str))
+                if rt_debug.get("tfs_segments") is not None:
+                    record_property("rt_tfs_segments", json.dumps(rt_debug["tfs_segments"], default=str))
+                    for leg in rt_debug["tfs_segments"]:
+                        for seg in leg or []:
+                            origin = seg.get("origin")
+                            destination = seg.get("destination")
+                            assert IATA_RE.fullmatch(origin or ""), f"segment origin not IATA: {origin}"
+                            assert IATA_RE.fullmatch(destination or ""), f"segment destination not IATA: {destination}"
+            expected_airline = _expected_airline(origin, destination)
+            if expected_airline:
+                _assert_itinerary_has_airline(outbound, expected_airline, "outbound")
+                _assert_itinerary_has_airline(inbound, expected_airline, "inbound")
             outbound_price, outbound_currency = _get_price_summary(outbound)
             inbound_price, inbound_currency = _get_price_summary(inbound)
             assert outbound_price is not None and inbound_price is not None
