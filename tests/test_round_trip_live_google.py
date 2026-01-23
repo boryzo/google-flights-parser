@@ -348,3 +348,56 @@ def test_round_trip_live_google_flights(origin: str, destination: str, record_pr
         raise last_error
 
     raise AssertionError(f"RT live test: {origin}->{destination} had no successful attempts")
+
+
+def test_round_trip_gdn_waw_all_best(record_property) -> None:
+    _configure_test_logging()
+
+    origin = "GDN"
+    destination = "WAW"
+    depart_date = _future_date(90)
+    return_date = _future_date(97)
+
+    flight_data = [
+        FlightData(date=depart_date, from_airport=origin, to_airport=destination),
+        FlightData(date=return_date, from_airport=destination, to_airport=origin),
+    ]
+
+    result = get_flights(
+        flight_data=flight_data,
+        trip="round-trip",
+        seat="economy",
+        passengers=Passengers(adults=1),
+        fetch_mode="common",
+        data_source="js",
+    )
+
+    assert isinstance(result, core.RoundTripDecodedResult)
+    assert result is not None
+
+    outbound_best = getattr(result.outbound, "best", []) or []
+    inbound_best = getattr(result.inbound, "best", []) or []
+
+    assert outbound_best, "No outbound best itineraries for GDN->WAW"
+    assert inbound_best, "No inbound best itineraries for WAW->GDN"
+
+    for itinerary in outbound_best:
+        assert _has_complete_flight_details(itinerary, origin, destination), (
+            "Outbound best itinerary missing details"
+        )
+
+    for itinerary in inbound_best:
+        assert _has_complete_flight_details(itinerary, destination, origin), (
+            "Inbound best itinerary missing details"
+        )
+
+    record_property("gdn_waw_outbound_best_count", str(len(outbound_best)))
+    record_property("gdn_waw_inbound_best_count", str(len(inbound_best)))
+    record_property(
+        "gdn_waw_outbound_best",
+        json.dumps([_format_itinerary_details(it, "outbound") for it in outbound_best], default=str),
+    )
+    record_property(
+        "gdn_waw_inbound_best",
+        json.dumps([_format_itinerary_details(it, "inbound") for it in inbound_best], default=str),
+    )
