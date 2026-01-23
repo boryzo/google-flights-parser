@@ -474,18 +474,25 @@ def _segments_payload_from_tfs(tfs_value: str | None) -> list[list[dict]] | None
         if not leg:
             payload.append([])
             continue
-        payload.append(
-            [
-                {
-                    "origin": s.origin,
-                    "destination": s.destination,
-                    "carrier_code": s.carrier_code,
-                    "flight_number": s.flight_number,
-                    "date": s.date,
-                }
-                for s in leg
-            ]
-        )
+        normalized_leg: list[dict] = []
+        for s in leg:
+            origin_code, origin_name = _normalize_airport_value(getattr(s, "origin", None))
+            destination_code, destination_name = _normalize_airport_value(getattr(s, "destination", None))
+            if not origin_code or not destination_code:
+                continue
+            entry = {
+                "origin": origin_code,
+                "destination": destination_code,
+                "carrier_code": s.carrier_code,
+                "flight_number": s.flight_number,
+                "date": s.date,
+            }
+            if origin_name:
+                entry["origin_airport_name"] = origin_name
+            if destination_name:
+                entry["destination_airport_name"] = destination_name
+            normalized_leg.append(entry)
+        payload.append(normalized_leg)
     return payload
 
 
@@ -495,6 +502,19 @@ def _pick_iata_code(value: object, alt_value: object | None = None) -> str | Non
         if isinstance(candidate, str) and re.fullmatch(r"[A-Z]{3}", candidate):
             return candidate
     return None
+
+
+def _normalize_airport_value(value: object) -> tuple[str | None, str | None]:
+    """Return (iata_code, airport_name) from a raw airport field."""
+    if not isinstance(value, str):
+        return None, None
+    cleaned = value.strip()
+    if re.fullmatch(r"[A-Z]{3}", cleaned):
+        return cleaned, None
+    match = re.search(r"\b([A-Z]{3})\b", cleaned.upper())
+    if match:
+        return match.group(1), cleaned
+    return None, cleaned or None
 
 
 def _apply_round_trip_total_price(inbound: DecodedResult, selected_outbound: Itinerary) -> None:
