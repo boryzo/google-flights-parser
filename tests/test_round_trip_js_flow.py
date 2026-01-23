@@ -137,7 +137,16 @@ class RoundTripFlowTests(TestCase):
 
     def test_round_trip_followup_parses_inbound(self) -> None:
         outbound_raw = _make_result_raw([_make_itinerary_raw("OUTBOUND_REF_123456", 12345)])
-        inbound_raw = _make_result_raw([_make_itinerary_raw("INBOUND_REF_654321", 23456)])
+        inbound_raw = _make_result_raw(
+            [
+                _make_itinerary_raw_with_details(
+                    selection_ref="INBOUND_REF_654321",
+                    price=23456,
+                    dep_airport="LAX",
+                    arr_airport="SFO",
+                )
+            ]
+        )
 
         outbound_html = _wrap_js_page(_wrap_js_data(outbound_raw))
         inbound_html = _wrap_js_page(_wrap_js_data(inbound_raw))
@@ -152,7 +161,10 @@ class RoundTripFlowTests(TestCase):
             seat="economy",
         )
 
-        with patch.object(core, "fetch", side_effect=[_FakeResponse(outbound_html), _FakeResponse(inbound_html)]):
+        with (
+            patch.object(core, "fetch", return_value=_FakeResponse(outbound_html)),
+            patch.object(core, "fetch_search", return_value=_FakeResponse(inbound_html)),
+        ):
             result = core.get_flights_from_filter(
                 tfs,
                 data_source="js",
@@ -226,7 +238,10 @@ class RoundTripFlowTests(TestCase):
             seat="economy",
         )
 
-        with patch.object(core, "fetch", side_effect=[_FakeResponse(outbound_html), _FakeResponse(inbound_html)]):
+        with (
+            patch.object(core, "fetch", return_value=_FakeResponse(outbound_html)),
+            patch.object(core, "fetch_search", return_value=_FakeResponse(inbound_html)),
+        ):
             result = core.get_flights_from_filter(
                 tfs,
                 data_source="js",
