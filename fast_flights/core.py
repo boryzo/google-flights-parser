@@ -15,7 +15,7 @@ from selectolax.lexbor import LexborHTMLParser, LexborNode
 
 from .decoder import DecodedResult, Itinerary, ResultDecoder, RoundTripDecodedResult
 from .schema import Flight, Result, Segment
-from .flights_impl import FlightData, Passengers
+from .flights_impl import FlightData, Passengers, segments_from_tfs, build_tfs_with_segments
 from . import flights_pb2 as PB
 from .filter import TFSData
 from .fallback_playwright import fallback_playwright_fetch
@@ -74,6 +74,14 @@ _BOOKING_TFS_RE = re.compile(
     re.VERBOSE,
 )
 
+# Generic tfu token extraction (search/booking flows).
+_TFU_TOKEN_RE = re.compile(
+    r"""
+    tfu(?:=|\\u003d)(?P<tfu>[A-Za-z0-9%_\-+/=]{4,})
+    """,
+    re.VERBOSE,
+)
+
 # Candidate base64-ish strings embedded in HTML/JS (quoted strings).
 # This is used to infer "booking tfs" when no explicit booking link exists.
 _B64_STRING_RE = re.compile(r'["\']([A-Za-z0-9\-_+/=]{60,})["\']')
@@ -85,6 +93,14 @@ def fetch(params: dict, request_kwargs: dict | None = None) -> Response:
     client = Client(impersonate="chrome_126", verify=False)
     req_kwargs = request_kwargs.copy() if request_kwargs else {}
     res = client.get("https://www.google.com/travel/flights", params=params, **req_kwargs)
+    assert res.status_code == 200, f"{res.status_code} Result: {res.text_markdown}"
+    return res
+
+
+def fetch_search(params: dict, request_kwargs: dict | None = None) -> Response:
+    client = Client(impersonate="chrome_126", verify=False)
+    req_kwargs = request_kwargs.copy() if request_kwargs else {}
+    res = client.get("https://www.google.com/travel/flights/search", params=params, **req_kwargs)
     assert res.status_code == 200, f"{res.status_code} Result: {res.text_markdown}"
     return res
 
@@ -266,7 +282,7 @@ def _extract_js_data_candidates(html_text: str) -> list[list]:
     return candidates
 
 
-def _iter_js_lists(data: object, *, limit: int = 200) -> list[list]:
+def _iter_js_lists(data: object, *, limit: int = 2000) -> list[list]:
     lists: list[list] = []
     seen: set[int] = set()
     stack = [data]
@@ -284,18 +300,92 @@ def _iter_js_lists(data: object, *, limit: int = 200) -> list[list]:
     return lists
 
 
+def _looks_like_itinerary(el: object) -> bool:
+    if not isinstance(el, list) or len(el) < 2:
+        return False
+    details = el[0]
+    summary = el[1]
+    if not isinstance(details, list) or len(details) < 9:
+        return False
+    if not isinstance(summary, list) or len(summary) < 2:
+        return False
+    return True
+
+
+def _looks_like_itinerary_list(candidate: object) -> bool:
+    if not isinstance(candidate, list) or not candidate:
+        return False
+    if not all(_looks_like_itinerary(el) for el in candidate):
+        return False
+    for el in candidate:
+        try:
+            details = el[0]
+            dep = details[3]
+            arr = details[6]
+        except Exception:
+            continue
+        if isinstance(dep, str) and len(dep) == 3 and isinstance(arr, str) and len(arr) == 3:
+            return True
+    return False
+
+
+def _wrap_itinerary_list(candidate: list) -> list:
+    # ResultDecoder expects [2][0] and [3][0] to be lists of itineraries.
+    return [None, None, [candidate], [[]]]
+
+
+def _looks_like_result_root(candidate: list) -> bool:
+    if not isinstance(candidate, list) or len(candidate) < 4:
+        return False
+    if not isinstance(candidate[2], list) or not isinstance(candidate[3], list):
+        return False
+    # Must have nested list slots for itineraries.
+    if candidate[2]:
+        if not isinstance(candidate[2][0], list):
+            return False
+        if not any(_looks_like_itinerary(el) for el in candidate[2][0]):
+            return False
+    if candidate[3]:
+        if not isinstance(candidate[3][0], list):
+            return False
+        if not any(_looks_like_itinerary(el) for el in candidate[3][0]):
+            return False
+    return True
+
+
 def _decode_js_result_from_html(html_text: str) -> DecodedResult:
     candidates = _extract_js_data_candidates(html_text)
     if not candidates:
-        return ResultDecoder.decode(_extract_js_data(html_text))
+        candidates = [_extract_js_data(html_text)]
 
     last_error: Exception | None = None
     best_decoded: DecodedResult | None = None
     best_score = -1
     for data in candidates:
         for candidate in _iter_js_lists(data):
+            if not _looks_like_result_root(candidate):
+                continue
             try:
                 decoded = ResultDecoder.decode(candidate)
+            except Exception as err:
+                last_error = err
+                continue
+            if not _decoded_result_has_itineraries(decoded):
+                continue
+            score = _decoded_result_score(decoded)
+            if score > best_score:
+                best_decoded = decoded
+                best_score = score
+
+    if best_decoded is not None:
+        return best_decoded
+
+    for data in candidates:
+        for candidate in _iter_js_lists(data):
+            if not _looks_like_itinerary_list(candidate):
+                continue
+            try:
+                decoded = ResultDecoder.decode(_wrap_itinerary_list(candidate))
             except Exception as err:
                 last_error = err
                 continue
@@ -320,6 +410,21 @@ def _decoded_result_has_itineraries(decoded: DecodedResult) -> bool:
             continue
         for item in items:
             if getattr(item, "departure_airport", None):
+                return True
+    return False
+
+
+def _decoded_result_has_route(decoded: DecodedResult, dep: str, arr: str) -> bool:
+    if not decoded:
+        return False
+    for items in (getattr(decoded, "best", None), getattr(decoded, "other", None)):
+        if not items or not isinstance(items, (list, tuple)):
+            continue
+        for item in items:
+            if (
+                getattr(item, "departure_airport", None) == dep
+                and getattr(item, "arrival_airport", None) == arr
+            ):
                 return True
     return False
 
@@ -354,6 +459,42 @@ def _decoded_result_score(decoded: DecodedResult) -> int:
                 score += 1
 
     return score
+
+
+def _segments_payload_from_tfs(tfs_value: str | None) -> list[list[dict]] | None:
+    if not tfs_value:
+        return None
+    try:
+        segments_by_leg = segments_from_tfs(tfs_value)
+    except Exception as err:
+        logger.debug("RT JS flow: segments_from_tfs failed: %s", err)
+        return None
+    payload: list[list[dict]] = []
+    for leg in segments_by_leg:
+        if not leg:
+            payload.append([])
+            continue
+        payload.append(
+            [
+                {
+                    "origin": s.origin,
+                    "destination": s.destination,
+                    "carrier_code": s.carrier_code,
+                    "flight_number": s.flight_number,
+                    "date": s.date,
+                }
+                for s in leg
+            ]
+        )
+    return payload
+
+
+def _pick_iata_code(value: object, alt_value: object | None = None) -> str | None:
+    """Return 3-letter IATA code from primary/alt values if present."""
+    for candidate in (value, alt_value):
+        if isinstance(candidate, str) and re.fullmatch(r"[A-Z]{3}", candidate):
+            return candidate
+    return None
 
 
 def _apply_round_trip_total_price(inbound: DecodedResult, selected_outbound: Itinerary) -> None:
@@ -533,6 +674,138 @@ def _extract_booking_tfs_from_js_data(data: object) -> Optional[str]:
     return None
 
 
+def _extract_tfu_tokens_from_html(html: str) -> list[str]:
+    normalized = _normalize_html_token_text(html)
+    tokens: list[str] = []
+    for m in _TFU_TOKEN_RE.finditer(normalized):
+        tfu = urllib.parse.unquote(m.group("tfu"))
+        if not tfu:
+            continue
+        if " " in tfu:
+            continue
+        if not _B64ISH_RE.fullmatch(tfu):
+            continue
+        if tfu.startswith(_TFU2_PREFIXES) and len(tfu) >= 20:
+            tokens.append(tfu)
+    return tokens
+
+
+def _extract_tfu_tokens_from_js_data(data: object) -> list[str]:
+    tokens: list[str] = []
+    for text in _iter_js_strings(data):
+        normalized = _normalize_html_token_text(text)
+        for m in _TFU_TOKEN_RE.finditer(normalized):
+            tfu = urllib.parse.unquote(m.group("tfu"))
+            if not tfu:
+                continue
+            if " " in tfu:
+                continue
+            if not _B64ISH_RE.fullmatch(tfu):
+                continue
+            if tfu.startswith(_TFU2_PREFIXES) and len(tfu) >= 20:
+                tokens.append(tfu)
+    return tokens
+
+
+def _extract_tfs_candidates_from_html(
+    html: str,
+    origin: str,
+    destination: str,
+    *,
+    limit: int = 10,
+) -> list[str]:
+    """
+    Try to find tfs tokens in HTML that decode into PB.Info with the expected route.
+    This is used for /search follow-ups when explicit pairs are missing.
+    """
+    normalized = _normalize_html_token_text(html)
+    candidates = _B64_STRING_RE.findall(normalized)
+    if len(candidates) > 5000:
+        candidates = candidates[:5000]
+    out: list[str] = []
+    for tok in candidates:
+        if len(tok) < 80:
+            continue
+        if " " in tok:
+            continue
+        if not _B64ISH_RE.fullmatch(tok):
+            continue
+        try:
+            b = _b64url_decode_bytes(tok)
+        except Exception:
+            continue
+        info = PB.Info()
+        try:
+            info.ParseFromString(b)
+        except Exception:
+            continue
+        if info.trip != PB.Trip.ROUND_TRIP:
+            continue
+        if len(info.data) < 2:
+            continue
+        fd_out = info.data[0]
+        fd_in = info.data[1]
+        if (
+            fd_out.from_flight.airport == origin
+            and fd_out.to_flight.airport == destination
+            and fd_in.from_flight.airport == destination
+            and fd_in.to_flight.airport == origin
+        ):
+            out.append(tok)
+            if len(out) >= limit:
+                break
+    return out
+
+
+def _extract_tfs_candidates_from_js_data(
+    data: object,
+    origin: str,
+    destination: str,
+    *,
+    limit: int = 10,
+) -> list[str]:
+    candidates: list[str] = []
+    for text in _iter_js_strings(data):
+        if not text:
+            continue
+        token_pool: list[str] = []
+        if len(text) >= 80 and _B64ISH_RE.fullmatch(text):
+            token_pool.append(text)
+        token_pool.extend(_B64_STRING_RE.findall(text))
+        for tok in token_pool:
+            if len(tok) < 80:
+                continue
+            if " " in tok:
+                continue
+            if not _B64ISH_RE.fullmatch(tok):
+                continue
+            try:
+                b = _b64url_decode_bytes(tok)
+            except Exception:
+                continue
+            info = PB.Info()
+            try:
+                info.ParseFromString(b)
+            except Exception:
+                continue
+            if info.trip != PB.Trip.ROUND_TRIP:
+                continue
+            if len(info.data) < 2:
+                continue
+            fd_out = info.data[0]
+            fd_in = info.data[1]
+            if (
+                fd_out.from_flight.airport == origin
+                and fd_out.to_flight.airport == destination
+                and fd_in.from_flight.airport == destination
+                and fd_in.to_flight.airport == origin
+            ):
+                candidates.append(tok)
+                if len(candidates) >= limit:
+                    return candidates
+    return candidates
+
+
 def _score_token_bytes_match(selected: Itinerary, token_b: bytes) -> int:
     """
     Score decoded bytes against selected itinerary using substrings.
@@ -696,7 +969,6 @@ def get_flights_from_filter(
     params = {
         "tfs": data.decode("utf-8"),
         "hl": "en",
-        "tfu": _TFU_LISTING_DEFAULT,
         "curr": currency,
     }
 
@@ -722,19 +994,82 @@ def get_flights_from_filter(
 
     try:
         if data_source == "js" and filter.trip == PB.Trip.ROUND_TRIP:
-            def _decode_followup_from_flights(tfs_value: str) -> Optional[DecodedResult]:
+            debug_info: dict = {"path": None, "steps": []}
+
+            def _record_step(step: str, **fields) -> dict:
+                entry = {"step": step}
+                entry.update(fields)
+                debug_info["steps"].append(entry)
+                return entry
+
+            def _flights_url(params_dict: dict) -> str:
+                return "https://www.google.com/travel/flights?" + "&".join(
+                    f"{k}={v}" for k, v in params_dict.items()
+                )
+
+            def _search_url(params_dict: dict) -> str:
+                return "https://www.google.com/travel/flights/search?" + "&".join(
+                    f"{k}={v}" for k, v in params_dict.items()
+                )
+
+            def _maybe_set_tfs_segments(tfs_value: str | None) -> None:
+                if not tfs_value:
+                    return
+                if debug_info.get("tfs_segments") is not None:
+                    return
+                debug_info["tfs_segments"] = _segments_payload_from_tfs(tfs_value)
+
+            def _decode_followup_from_search(
+                tfs_value: str,
+                *,
+                entry: Optional[dict] = None,
+            ) -> Optional[DecodedResult]:
                 try:
-                    res_followup = _fetch_with_mode(
-                        {"tfs": tfs_value, "hl": params["hl"], "tfu": _TFU_LISTING_DEFAULT, "curr": params["curr"]},
-                        mode=mode,
-                        req_kwargs=req_kwargs,
-                    )
-                    return _decode_js_result_from_html(res_followup.text)
+                    search_params = {
+                        "tfs": tfs_value,
+                        "hl": params["hl"],
+                        "curr": params["curr"],
+                    }
+                    if entry is not None:
+                        entry["url"] = _search_url(search_params)
+                    res_search = fetch_search(search_params, request_kwargs=req_kwargs)
+                    decoded = _decode_js_result_from_html(res_search.text)
+                    if entry is not None:
+                        entry["status"] = "success"
+                    return decoded
                 except Exception as err:
+                    if entry is not None:
+                        entry["status"] = "error"
+                        entry["error"] = str(err)
+                    return None
+
+            def _decode_followup_from_flights(
+                tfs_value: str,
+                *,
+                entry: Optional[dict] = None,
+            ) -> Optional[DecodedResult]:
+                try:
+                    followup_params = {
+                        "tfs": tfs_value,
+                        "hl": params["hl"],
+                        "curr": params["curr"],
+                    }
+                    if entry is not None:
+                        entry["url"] = _flights_url(followup_params)
+                    res_followup = _fetch_with_mode(followup_params, mode=mode, req_kwargs=req_kwargs)
+                    decoded = _decode_js_result_from_html(res_followup.text)
+                    if entry is not None:
+                        entry["status"] = "success"
+                    return decoded
+                except Exception as err:
+                    if entry is not None:
+                        entry["status"] = "error"
+                        entry["error"] = str(err)
                     logger.warning("RT JS flow: flights endpoint decode failed: %s", err)
                     return None
 
             logger.info("RT JS flow: listing outbound options (request #1).")
+            debug_info["listing_url"] = _flights_url(params)
             outbound_raw = _extract_js_data(res1.text)
             try:
                 outbound_decoded = ResultDecoder.decode(outbound_raw)
@@ -751,141 +1086,150 @@ def get_flights_from_filter(
 
             target_minutes = _parse_target_time(target_time)
             selected_outbound = _select_outbound(outbound_itineraries, target_minutes)
+            selected_summary = getattr(selected_outbound, "itinerary_summary", None)
+            debug_info["selected_outbound"] = {
+                "departure_airport": getattr(selected_outbound, "departure_airport", None),
+                "arrival_airport": getattr(selected_outbound, "arrival_airport", None),
+                "departure_time": getattr(selected_outbound, "departure_time", None),
+                "arrival_time": getattr(selected_outbound, "arrival_time", None),
+                "price": getattr(selected_summary, "price", None),
+                "currency": getattr(selected_summary, "currency", None),
+            }
 
-            # Path A: follow-up pairs (tfs2, tfu2) embedded directly in listing HTML
-            pairs = _extract_followup_pairs_from_html(res1.text)
-            logger.info("RT JS flow: follow-up pairs found in listing HTML=%d.", len(pairs))
-            if not pairs:
-                js_candidates = _extract_js_data_candidates(res1.text)
-                for data in js_candidates:
-                    pairs.extend(_extract_followup_pairs_from_js_data(data))
-                if not pairs:
-                    pairs = _extract_followup_pairs_from_js_data(outbound_raw)
-                logger.info("RT JS flow: follow-up pairs found in JS data=%d.", len(pairs))
-
-            ranked_pairs = _rank_followup_pairs(selected_outbound, pairs)
-            best_pair_score = ranked_pairs[0][2] if ranked_pairs else 0
-            logger.info("RT JS flow: best follow-up match score=%d.", best_pair_score)
-
-            for tfs2, tfu2, score in ranked_pairs:
-                logger.info("RT JS flow: issuing follow-up request #2 via flights endpoint.")
-                res2 = _fetch_with_mode(
-                    {"tfs": tfs2, "hl": params["hl"], "tfu": tfu2, "curr": params["curr"]},
-                    mode=mode,
-                    req_kwargs=req_kwargs,
-                )
-                try:
-                    inbound_decoded = _decode_js_result_from_html(res2.text)
-                except Exception as err:
-                    logger.warning(
-                        "RT JS flow: follow-up decode failed (score=%d): %s",
-                        score,
-                        err,
-                    )
+            # Build a tfs with outbound segments embedded (no tfu).
+            selected_segments: list[Segment] = []
+            for f in getattr(selected_outbound, "flights", []) or []:
+                dep_date = getattr(f, "departure_date", None)
+                date_str = None
+                if isinstance(dep_date, (list, tuple)) and len(dep_date) >= 3:
+                    date_str = f"{int(dep_date[0]):04d}-{int(dep_date[1]):02d}-{int(dep_date[2]):02d}"
+                elif isinstance(dep_date, str):
+                    date_str = dep_date
+                if not date_str:
                     continue
-                _apply_round_trip_total_price(inbound_decoded, selected_outbound)
-                logger.info("RT JS flow: booking page decode succeeded via flights endpoint.")
-                return RoundTripDecodedResult(
-                    outbound=outbound_decoded,
-                    inbound=inbound_decoded,
-                    selected_outbound_ref=tfs2,
-                    selected_outbound=selected_outbound,
+                dep_code = _pick_iata_code(
+                    getattr(f, "departure_airport", None),
+                    getattr(f, "departure_airport_name", None),
                 )
+                arr_code = _pick_iata_code(
+                    getattr(f, "arrival_airport", None),
+                    getattr(f, "arrival_airport_name", None),
+                )
+                if not dep_code or not arr_code:
+                    continue
+                selected_segments.append(
+                    Segment(
+                        origin=dep_code,
+                        destination=arr_code,
+                        carrier_code=getattr(f, "airline", None) or "",
+                        flight_number=str(getattr(f, "flight_number", "")),
+                        date=date_str,
+                    )
+                )
+            selected_tfs_with_segments: str | None = None
+            if selected_segments:
+                try:
+                    selected_tfs_with_segments = build_tfs_with_segments(
+                        filter,
+                        [selected_segments, []],
+                    )
+                    debug_info["selected_tfs_segments_len"] = len(selected_tfs_with_segments)
+                except Exception as err:
+                    logger.debug("RT JS flow: build_tfs_with_segments failed: %s", err)
+
+            # Path A disabled: ignore tfu-based follow-ups (user request).
+            pairs: list[tuple[str, str]] = []
+            debug_info["followup_pairs_found"] = 0
+            debug_info["best_pair_score"] = 0
 
             selected_ref = getattr(selected_outbound, "selection_ref", None)
             if selected_ref:
                 logger.info("RT JS flow: using selected outbound ref for follow-up request #2.")
                 selected_tfs = filter.with_selected_outbound(selected_ref).as_b64().decode("utf-8")
-                inbound_decoded = _decode_followup_from_flights(selected_tfs)
-                if inbound_decoded:
+                debug_info["selected_outbound_ref"] = selected_ref
+                entry = _record_step("selected_outbound_ref", tfs_len=len(selected_tfs))
+                entry["url"] = _flights_url(
+                    {
+                        "tfs": selected_tfs,
+                        "hl": params["hl"],
+                        "curr": params["curr"],
+                    }
+                )
+                _maybe_set_tfs_segments(selected_tfs)
+                inbound_decoded = _decode_followup_from_search(selected_tfs, entry=entry)
+                if inbound_decoded and _decoded_result_has_route(inbound_decoded, destination, origin):
                     _apply_round_trip_total_price(inbound_decoded, selected_outbound)
+                    debug_info["path"] = "selected_outbound_ref"
                     logger.info("RT JS flow: follow-up decode succeeded via selected outbound ref.")
                     return RoundTripDecodedResult(
                         outbound=outbound_decoded,
                         inbound=inbound_decoded,
                         selected_outbound_ref=selected_ref,
                         selected_outbound=selected_outbound,
+                        debug=debug_info,
                     )
 
-            # Path B: explicit booking deep link present in listing HTML
-            booking_tfs = _extract_booking_tfs_from_html(res1.text)
-            if not booking_tfs:
-                js_candidates = _extract_js_data_candidates(res1.text)
-                for data in js_candidates:
-                    booking_tfs = _extract_booking_tfs_from_js_data(data)
-                    if booking_tfs:
-                        break
-            if not booking_tfs:
-                booking_tfs = _extract_booking_tfs_from_js_data(outbound_raw)
-            if booking_tfs:
-                logger.warning("RT JS flow: explicit booking?tfs token detected; score=explicit.")
-                resb = fetch_booking(booking_tfs, request_kwargs=req_kwargs)
-                try:
-                    inbound_decoded = _decode_js_result_from_html(resb.text)
-                except Exception as err:
-                    logger.warning("RT JS flow: explicit booking decode failed: %s", err)
+            # Path D: try /search endpoint with extracted tfu + tfs candidates.
+            origin = getattr(filter.flight_data[0], "from_airport", None) if filter.flight_data else None
+            destination = getattr(filter.flight_data[0], "to_airport", None) if filter.flight_data else None
+            if origin and destination:
+                if selected_ref:
+                    selected_tfs = filter.with_selected_outbound(selected_ref).as_b64().decode("utf-8")
                 else:
-                    _apply_round_trip_total_price(inbound_decoded, selected_outbound)
-                    logger.info("RT JS flow: booking page decode succeeded (explicit token).")
-                    return RoundTripDecodedResult(
-                        outbound=outbound_decoded,
-                        inbound=inbound_decoded,
-                        selected_outbound_ref=booking_tfs,
-                        selected_outbound=selected_outbound,
-                    )
-                fallback_decoded = _decode_followup_from_flights(booking_tfs)
-                if fallback_decoded:
-                    _apply_round_trip_total_price(fallback_decoded, selected_outbound)
-                    logger.info("RT JS flow: flights endpoint decode succeeded (explicit token).")
-                    return RoundTripDecodedResult(
-                        outbound=outbound_decoded,
-                        inbound=fallback_decoded,
-                        selected_outbound_ref=booking_tfs,
-                        selected_outbound=selected_outbound,
-                    )
+                    selected_tfs = None
+                tfs_candidates = _extract_tfs_candidates_from_html(res1.text, origin, destination)
+                if tfs_candidates:
+                    pass
+                else:
+                    js_candidates = _extract_js_data_candidates(res1.text)
+                    for data in js_candidates:
+                        tfs_candidates.extend(_extract_tfs_candidates_from_js_data(data, origin, destination))
+                    if not tfs_candidates:
+                        tfs_candidates.extend(_extract_tfs_candidates_from_js_data(outbound_raw, origin, destination))
+                if not tfs_candidates:
+                    # Fallback: try the base listing tfs even if it may not include selections.
+                    tfs_candidates = [params["tfs"]]
+                if selected_tfs_with_segments and selected_tfs_with_segments not in tfs_candidates:
+                    tfs_candidates.insert(0, selected_tfs_with_segments)
+                if selected_tfs and selected_tfs not in tfs_candidates:
+                    tfs_candidates.insert(0, selected_tfs)
 
-            # Path C: infer booking token from embedded base64-ish strings
-            inferred_candidates = _infer_booking_tfs_from_embedded_strings(
-                res1.text,
-                selected_outbound,
-            )
-            seen_inferred: set[str] = set()
-            for inferred_booking_tfs, inferred_score in inferred_candidates:
-                if inferred_booking_tfs in seen_inferred:
-                    continue
-                seen_inferred.add(inferred_booking_tfs)
-                logger.warning(
-                    "RT JS flow: inferred booking token; score=%d; using booking?tfs flow.",
-                    inferred_score,
-                )
-                resb = fetch_booking(inferred_booking_tfs, request_kwargs=req_kwargs)
-                try:
-                    inbound_decoded = _decode_js_result_from_html(resb.text)
-                except Exception as err:
-                    logger.warning(
-                        "RT JS flow: inferred booking decode failed (score=%d): %s",
-                        inferred_score,
-                        err,
-                    )
-                else:
-                    _apply_round_trip_total_price(inbound_decoded, selected_outbound)
-                    logger.info("RT JS flow: booking page decode succeeded (inferred token).")
-                    return RoundTripDecodedResult(
-                        outbound=outbound_decoded,
-                        inbound=inbound_decoded,
-                        selected_outbound_ref=inferred_booking_tfs,
-                        selected_outbound=selected_outbound,
-                    )
-                fallback_decoded = _decode_followup_from_flights(inferred_booking_tfs)
-                if fallback_decoded:
-                    _apply_round_trip_total_price(fallback_decoded, selected_outbound)
-                    logger.info("RT JS flow: flights endpoint decode succeeded (inferred token).")
-                    return RoundTripDecodedResult(
-                        outbound=outbound_decoded,
-                        inbound=fallback_decoded,
-                        selected_outbound_ref=inferred_booking_tfs,
-                        selected_outbound=selected_outbound,
-                    )
+                debug_info["tfs_candidates"] = tfs_candidates[:5]
+                if tfs_candidates:
+                    for tfs_candidate in tfs_candidates[:5]:
+                        _maybe_set_tfs_segments(tfs_candidate)
+                        params_search = {
+                            "tfs": tfs_candidate,
+                            "hl": params["hl"],
+                            "curr": params["curr"],
+                        }
+                        entry = _record_step(
+                            "search_endpoint",
+                            tfs_len=len(tfs_candidate),
+                        )
+                        entry["url"] = _search_url(params_search)
+                        try:
+                            res_search = fetch_search(params_search, request_kwargs=req_kwargs)
+                            inbound_decoded = _decode_js_result_from_html(res_search.text)
+                        except Exception as err:
+                            entry["status"] = "error"
+                            entry["error"] = str(err)
+                            continue
+                        if not _decoded_result_has_route(inbound_decoded, destination, origin):
+                            entry["status"] = "error"
+                            entry["error"] = "search_result_missing_inbound_route"
+                            continue
+                        entry["status"] = "success"
+                        _apply_round_trip_total_price(inbound_decoded, selected_outbound)
+                        debug_info["path"] = "search_endpoint"
+                        logger.info("RT JS flow: /search decode succeeded.")
+                        return RoundTripDecodedResult(
+                            outbound=outbound_decoded,
+                            inbound=inbound_decoded,
+                            selected_outbound_ref=tfs_candidate,
+                            selected_outbound=selected_outbound,
+                            debug=debug_info,
+                        )
 
             # Nothing worked; dump listing for diagnosis.
             if len(getattr(filter, "flight_data", []) or []) > 1:
@@ -911,11 +1255,13 @@ def get_flights_from_filter(
                 if isinstance(fallback_result, DecodedResult):
                     logger.info("RT JS flow: one-way fallback decode succeeded.")
                     _apply_round_trip_total_price(fallback_result, selected_outbound)
+                    debug_info["path"] = "one_way_fallback"
                     return RoundTripDecodedResult(
                         outbound=outbound_decoded,
                         inbound=fallback_result,
                         selected_outbound_ref="one-way-fallback",
                         selected_outbound=selected_outbound,
+                        debug=debug_info,
                     )
 
             _dump_listing_debug(res1.text)
@@ -1008,8 +1354,7 @@ def parse_response(
 
     if data_source == "js":
         try:
-            data = _extract_js_data(r.text)
-            return ResultDecoder.decode(data) if data is not None else None
+            return _decode_js_result_from_html(r.text)
         except Exception as err:
             logger.warning("JS parse failed; dumped listing HTML for debugging: %s", err)
             _dump_listing_debug(r.text)
