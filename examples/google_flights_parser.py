@@ -3,10 +3,13 @@ from __future__ import annotations
 from datetime import datetime
 from types import SimpleNamespace
 import re
-from typing import List, Optional, Any
+from typing import List, Optional, Any, Tuple
 
 from fast_flights import FlightData, Passengers, create_filter, get_flights_from_filter
 from fast_flights import core
+
+
+IATA_RE = re.compile(r"^[A-Z]{3}$")
 
 
 def _dt_from_parts(date_part, time_part) -> Optional[datetime]:
@@ -45,6 +48,44 @@ def _normalize_airport_input(value: Any) -> tuple[str, Any, Optional[str]]:
     raise ValueError(f"Airport code must be IATA (3 letters). Got: {value!r}")
 
 
+def _is_iata(value: object) -> bool:
+    return isinstance(value, str) and IATA_RE.fullmatch(value.strip().upper()) is not None
+
+
+def _split_airport_fields(code_value: object, name_value: object) -> Tuple[Optional[str], Optional[str]]:
+    """Return (iata_code, airport_name) while preserving IATA in the main field."""
+    code = None
+    name = None
+
+    code_str = code_value.strip() if isinstance(code_value, str) else None
+    name_str = name_value.strip() if isinstance(name_value, str) else None
+
+    if _is_iata(code_str):
+        code = code_str.upper()
+        if name_str and not _is_iata(name_str):
+            name = name_str
+    elif _is_iata(name_str):
+        code = name_str.upper()
+        if code_str and not _is_iata(code_str):
+            name = code_str
+    else:
+        for candidate in (code_str, name_str):
+            if isinstance(candidate, str):
+                match = re.search(r"\b([A-Z]{3})\b", candidate.upper())
+                if match:
+                    code = match.group(1)
+                    if candidate != code:
+                        name = candidate
+                    break
+        if code is None:
+            if code_str:
+                name = code_str
+            elif name_str:
+                name = name_str
+
+    return code, name
+
+
 def _flight_numbers(itinerary: core.Itinerary) -> List[str]:
     numbers: List[str] = []
     for fl in getattr(itinerary, "flights", []) or []:
@@ -58,15 +99,29 @@ def _flight_numbers(itinerary: core.Itinerary) -> List[str]:
 def _format_segments(itinerary: core.Itinerary) -> List[dict] | None:
     segments = []
     for fl in getattr(itinerary, "flights", []) or []:
+        origin_code, origin_name = _split_airport_fields(
+            getattr(fl, "departure_airport", None),
+            getattr(fl, "departure_airport_name", None),
+        )
+        destination_code, destination_name = _split_airport_fields(
+            getattr(fl, "arrival_airport", None),
+            getattr(fl, "arrival_airport_name", None),
+        )
+        if not origin_code or not destination_code:
+            continue
         entry = {
             "carrier_code": getattr(fl, "airline", None),
             "flight_number": getattr(fl, "flight_number", None),
-            "origin": getattr(fl, "departure_airport", None),
-            "destination": getattr(fl, "arrival_airport", None),
+            "origin": origin_code,
+            "destination": destination_code,
             "date": getattr(fl, "departure_date", None),
             "departure_time": getattr(fl, "departure_time", None),
             "arrival_time": getattr(fl, "arrival_time", None),
         }
+        if origin_name:
+            entry["origin_airport_name"] = origin_name
+        if destination_name:
+            entry["destination_airport_name"] = destination_name
         if any(entry.values()):
             segments.append({k: v for k, v in entry.items() if v is not None})
     return segments or None
