@@ -75,6 +75,73 @@ Airport.TAIPEI
 ## Cookies & consent
 The EU region is a bit tricky to solve for now, but the fallback support should be able to handle it.
 
+## Tests
+There are two kinds of tests:
+
+1) **Decoder/unit tests (offline)** – fast, no network.  
+2) **Live integration tests** – real requests to Google Flights (network required).
+
+### Local setup
+```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt pytest
+```
+
+### Run offline decoder tests
+```bash
+pytest tests/test_round_trip_js_flow.py -vv
+```
+
+### Run live round-trip tests (Google Flights)
+```bash
+pytest -s --log-cli-level=DEBUG tests/test_round_trip_live_google.py -vv
+```
+
+### Run live one-way tests (Google Flights)
+```bash
+pytest -s --log-cli-level=DEBUG tests/test_one_way_live_google.py -vv
+```
+
+### HTML report (local)
+```bash
+python scripts/run_pytest_html.py tests/test_round_trip_live_google.py -s --log-cli-level=DEBUG
+```
+Output:
+- `reports/pytest_report.html`
+- `reports/pytest_junit.xml`
+
+### One-command runner
+```bash
+./scripts/run-tests.sh
+```
+Runs:
+- `tests/test_round_trip_live_google.py`
+- `tests/test_one_way_live_google.py`
+- `tests/test_round_trip_js_flow.py`
+
+You can also pass custom pytest args:
+```bash
+./scripts/run-tests.sh tests/test_one_way_live_google.py -k GDN-LTN -vv
+```
+
+### Debugging failures
+For JS parsing failures we dump the listing HTML:
+- `/tmp/fast_flights_listing.html`
+- `/tmp/fast_flights_listing_snippet.txt`
+
+Useful env vars:
+- `LOG_LEVEL=DEBUG`
+- `RT_LIVE_OUTBOUND_DAYS=60`
+- `RT_LIVE_RETURN_GAP_DAYS=7`
+- `RT_LIVE_LOG_LIMIT=6`
+- `OW_LIVE_OUTBOUND_DAYS=60`
+- `OW_LIVE_LOG_LIMIT=6`
+
+### GitHub Actions
+Live tests run on GitHub Actions every **2 days** and can be triggered manually.  
+Workflow: `.github/workflows/live_flights_tests.yml`
+
 ## Contributing
 Contributing is welcomed! I probably won't work on this project unless there's a need for a major update, but boy howdy do I love pull requests.
 

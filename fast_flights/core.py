@@ -290,6 +290,8 @@ def _decode_js_result_from_html(html_text: str) -> DecodedResult:
         return ResultDecoder.decode(_extract_js_data(html_text))
 
     last_error: Exception | None = None
+    best_decoded: DecodedResult | None = None
+    best_score = -1
     for data in candidates:
         for candidate in _iter_js_lists(data):
             try:
@@ -297,8 +299,16 @@ def _decode_js_result_from_html(html_text: str) -> DecodedResult:
             except Exception as err:
                 last_error = err
                 continue
-            if _decoded_result_has_itineraries(decoded):
-                return decoded
+            if not _decoded_result_has_itineraries(decoded):
+                continue
+            score = _decoded_result_score(decoded)
+            if score > best_score:
+                best_decoded = decoded
+                best_score = score
+
+    if best_decoded is not None:
+        return best_decoded
+
     if last_error:
         raise last_error
     raise RuntimeError("No decodable js data candidates found.")
@@ -312,6 +322,61 @@ def _decoded_result_has_itineraries(decoded: DecodedResult) -> bool:
             if getattr(item, "departure_airport", None):
                 return True
     return False
+
+
+def _decoded_result_score(decoded: DecodedResult) -> int:
+    """
+    Prefer results with richer itinerary details (times, flights, flight numbers).
+    Used to select the best candidate when multiple ds:* blocks exist.
+    """
+    score = 0
+    items: list[Itinerary] = []
+    for group in (getattr(decoded, "best", None), getattr(decoded, "other", None)):
+        if group and isinstance(group, (list, tuple)):
+            items.extend(group)
+
+    for item in items:
+        if not item:
+            continue
+        # Base signal for a usable itinerary
+        score += 10
+        if getattr(item, "departure_time", None):
+            score += 3
+        if getattr(item, "arrival_time", None):
+            score += 3
+        flights = getattr(item, "flights", None) or []
+        if flights:
+            score += 5
+        for flight in flights:
+            if getattr(flight, "airline", None):
+                score += 1
+            if getattr(flight, "flight_number", None):
+                score += 1
+
+    return score
+
+
+def _apply_round_trip_total_price(inbound: DecodedResult, selected_outbound: Itinerary) -> None:
+    """
+    When round-trip follow-up returns per-leg prices, normalize inbound prices
+    to the total round-trip price from the selected outbound.
+    """
+    summary = getattr(selected_outbound, "itinerary_summary", None)
+    total_price = getattr(summary, "price", None)
+    total_currency = getattr(summary, "currency", None)
+    if total_price is None:
+        return
+
+    for group in (getattr(inbound, "best", None), getattr(inbound, "other", None)):
+        if not group or not isinstance(group, (list, tuple)):
+            continue
+        for itinerary in group:
+            it_summary = getattr(itinerary, "itinerary_summary", None)
+            if it_summary is None:
+                continue
+            it_summary.price = total_price
+            if total_currency:
+                it_summary.currency = total_currency
 
 
 def _parse_target_time(target_time: Optional[str]) -> Optional[int]:
@@ -671,7 +736,12 @@ def get_flights_from_filter(
 
             logger.info("RT JS flow: listing outbound options (request #1).")
             outbound_raw = _extract_js_data(res1.text)
-            outbound_decoded = ResultDecoder.decode(outbound_raw)
+            try:
+                outbound_decoded = ResultDecoder.decode(outbound_raw)
+            except Exception as err:
+                logger.warning("RT JS flow: primary outbound decode failed; trying multi-candidate decode: %s", err)
+                _dump_listing_debug(res1.text)
+                outbound_decoded = _decode_js_result_from_html(res1.text)
 
             out_best = getattr(outbound_decoded, "best", []) or []
             out_other = getattr(outbound_decoded, "other", []) or []
@@ -686,7 +756,11 @@ def get_flights_from_filter(
             pairs = _extract_followup_pairs_from_html(res1.text)
             logger.info("RT JS flow: follow-up pairs found in listing HTML=%d.", len(pairs))
             if not pairs:
-                pairs = _extract_followup_pairs_from_js_data(outbound_raw)
+                js_candidates = _extract_js_data_candidates(res1.text)
+                for data in js_candidates:
+                    pairs.extend(_extract_followup_pairs_from_js_data(data))
+                if not pairs:
+                    pairs = _extract_followup_pairs_from_js_data(outbound_raw)
                 logger.info("RT JS flow: follow-up pairs found in JS data=%d.", len(pairs))
 
             ranked_pairs = _rank_followup_pairs(selected_outbound, pairs)
@@ -709,6 +783,7 @@ def get_flights_from_filter(
                         err,
                     )
                     continue
+                _apply_round_trip_total_price(inbound_decoded, selected_outbound)
                 logger.info("RT JS flow: booking page decode succeeded via flights endpoint.")
                 return RoundTripDecodedResult(
                     outbound=outbound_decoded,
@@ -723,6 +798,7 @@ def get_flights_from_filter(
                 selected_tfs = filter.with_selected_outbound(selected_ref).as_b64().decode("utf-8")
                 inbound_decoded = _decode_followup_from_flights(selected_tfs)
                 if inbound_decoded:
+                    _apply_round_trip_total_price(inbound_decoded, selected_outbound)
                     logger.info("RT JS flow: follow-up decode succeeded via selected outbound ref.")
                     return RoundTripDecodedResult(
                         outbound=outbound_decoded,
@@ -734,6 +810,12 @@ def get_flights_from_filter(
             # Path B: explicit booking deep link present in listing HTML
             booking_tfs = _extract_booking_tfs_from_html(res1.text)
             if not booking_tfs:
+                js_candidates = _extract_js_data_candidates(res1.text)
+                for data in js_candidates:
+                    booking_tfs = _extract_booking_tfs_from_js_data(data)
+                    if booking_tfs:
+                        break
+            if not booking_tfs:
                 booking_tfs = _extract_booking_tfs_from_js_data(outbound_raw)
             if booking_tfs:
                 logger.warning("RT JS flow: explicit booking?tfs token detected; score=explicit.")
@@ -743,6 +825,7 @@ def get_flights_from_filter(
                 except Exception as err:
                     logger.warning("RT JS flow: explicit booking decode failed: %s", err)
                 else:
+                    _apply_round_trip_total_price(inbound_decoded, selected_outbound)
                     logger.info("RT JS flow: booking page decode succeeded (explicit token).")
                     return RoundTripDecodedResult(
                         outbound=outbound_decoded,
@@ -752,6 +835,7 @@ def get_flights_from_filter(
                     )
                 fallback_decoded = _decode_followup_from_flights(booking_tfs)
                 if fallback_decoded:
+                    _apply_round_trip_total_price(fallback_decoded, selected_outbound)
                     logger.info("RT JS flow: flights endpoint decode succeeded (explicit token).")
                     return RoundTripDecodedResult(
                         outbound=outbound_decoded,
@@ -784,6 +868,7 @@ def get_flights_from_filter(
                         err,
                     )
                 else:
+                    _apply_round_trip_total_price(inbound_decoded, selected_outbound)
                     logger.info("RT JS flow: booking page decode succeeded (inferred token).")
                     return RoundTripDecodedResult(
                         outbound=outbound_decoded,
@@ -793,6 +878,7 @@ def get_flights_from_filter(
                     )
                 fallback_decoded = _decode_followup_from_flights(inferred_booking_tfs)
                 if fallback_decoded:
+                    _apply_round_trip_total_price(fallback_decoded, selected_outbound)
                     logger.info("RT JS flow: flights endpoint decode succeeded (inferred token).")
                     return RoundTripDecodedResult(
                         outbound=outbound_decoded,
@@ -824,6 +910,7 @@ def get_flights_from_filter(
                 )
                 if isinstance(fallback_result, DecodedResult):
                     logger.info("RT JS flow: one-way fallback decode succeeded.")
+                    _apply_round_trip_total_price(fallback_result, selected_outbound)
                     return RoundTripDecodedResult(
                         outbound=outbound_decoded,
                         inbound=fallback_result,
@@ -920,8 +1007,13 @@ def parse_response(
         return n or blank
 
     if data_source == "js":
-        data = _extract_js_data(r.text)
-        return ResultDecoder.decode(data) if data is not None else None
+        try:
+            data = _extract_js_data(r.text)
+            return ResultDecoder.decode(data) if data is not None else None
+        except Exception as err:
+            logger.warning("JS parse failed; dumped listing HTML for debugging: %s", err)
+            _dump_listing_debug(r.text)
+            raise
 
     parser = LexborHTMLParser(r.text)
     flights = []
