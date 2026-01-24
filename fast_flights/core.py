@@ -1162,6 +1162,9 @@ def get_flights_from_filter(
             debug_info["followup_pairs_found"] = 0
             debug_info["best_pair_score"] = 0
 
+            origin = getattr(filter.flight_data[0], "from_airport", None) if filter.flight_data else None
+            destination = getattr(filter.flight_data[0], "to_airport", None) if filter.flight_data else None
+
             selected_ref = getattr(selected_outbound, "selection_ref", None)
             if selected_ref:
                 logger.info("RT JS flow: using selected outbound ref for follow-up request #2.")
@@ -1190,8 +1193,6 @@ def get_flights_from_filter(
                     )
 
             # Path D: try /search endpoint with extracted tfu + tfs candidates.
-            origin = getattr(filter.flight_data[0], "from_airport", None) if filter.flight_data else None
-            destination = getattr(filter.flight_data[0], "to_airport", None) if filter.flight_data else None
             if origin and destination:
                 if selected_ref:
                     selected_tfs = filter.with_selected_outbound(selected_ref).as_b64().decode("utf-8")
