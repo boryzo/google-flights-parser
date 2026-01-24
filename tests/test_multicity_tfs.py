@@ -1,7 +1,7 @@
 from fast_flights import FlightData, Passengers, create_filter
 
 
-def test_multicity_tfs_matches_google_link():
+def test_multicity_tfs_matches_google_link(record_property):
     # Matches the /travel/flights tfs for:
     # 2026-08-22 GDN -> ICN
     # 2026-09-07 NRT -> GDN
@@ -20,4 +20,9 @@ def test_multicity_tfs_matches_google_link():
         seat="economy",
     )
 
-    assert filt.as_b64().decode("utf-8") == expected_tfs
+    actual_tfs = filt.as_b64().decode("utf-8")
+    record_property("multicity_expected_tfs", expected_tfs)
+    record_property("multicity_actual_tfs", actual_tfs)
+    print(f"[MC][unit] expected_tfs={expected_tfs}")
+    print(f"[MC][unit] actual_tfs={actual_tfs}")
+    assert actual_tfs == expected_tfs

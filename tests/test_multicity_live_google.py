@@ -15,7 +15,7 @@ def _future_date(days: int) -> str:
     return (date.today() + timedelta(days=days)).strftime("%Y-%m-%d")
 
 
-def test_multicity_live_google_search_decodes() -> None:
+def test_multicity_live_google_search_decodes(record_property) -> None:
     depart_date = _future_date(OUTBOUND_DAYS)
     return_date = _future_date(OUTBOUND_DAYS + RETURN_GAP_DAYS)
 
@@ -36,7 +36,15 @@ def test_multicity_live_google_search_decodes() -> None:
     }
 
     logger.debug("[MC][live] params=%s", params)
+    record_property("multicity_depart_date", depart_date)
+    record_property("multicity_return_date", return_date)
+    record_property("multicity_tfs", params["tfs"])
+    print(f"[MC][live] depart_date={depart_date} return_date={return_date}")
+    print(f"[MC][live] tfs={params['tfs']}")
     req_kwargs = core._merge_binary_cookies(core._DEFAULT_COOKIES_BYTES, None)
     res = core.fetch(params, request_kwargs=req_kwargs)
     candidates = core._extract_js_data_candidates(res.text)
+    record_property("multicity_candidate_count", len(candidates))
+    record_property("multicity_html_len", len(res.text))
+    print(f"[MC][live] candidate_count={len(candidates)} html_len={len(res.text)}")
     assert candidates, "No JS data candidates found for multicity search response"
