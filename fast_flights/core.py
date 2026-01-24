@@ -18,7 +18,6 @@ from .flights_impl import FlightData, Passengers
 from . import flights_pb2 as PB
 from .filter import TFSData
 from .fallback_playwright import fallback_playwright_fetch
-from .bright_data_fetch import bright_data_fetch
 from .primp import Client, Response
 
 DataSource = Literal["html", "js"]
@@ -471,7 +470,7 @@ def _dump_listing_debug(html: str) -> None:
 def _fetch_with_mode(
     params: dict,
     *,
-    mode: Literal["common", "fallback", "force-fallback", "local", "bright-data"],
+    mode: Literal["common", "fallback", "force-fallback", "local"],
     req_kwargs: dict,
 ) -> Response:
     if mode in {"common", "fallback"}:
@@ -487,9 +486,6 @@ def _fetch_with_mode(
 
         return local_playwright_fetch(params, request_kwargs=req_kwargs)
 
-    if mode == "bright-data":
-        return bright_data_fetch(params, request_kwargs=req_kwargs)
-
     return fallback_playwright_fetch(params, request_kwargs=req_kwargs)
 
 
@@ -497,7 +493,7 @@ def get_flights_from_filter(
     filter: TFSData,
     currency: str = "",
     *,
-    mode: Literal["common", "fallback", "force-fallback", "local", "bright-data"] = "common",
+    mode: Literal["common", "fallback", "force-fallback", "local"] = "common",
     data_source: DataSource = "html",
     cookies: bytes | None = None,
     request_kwargs: dict | None = None,
@@ -637,7 +633,7 @@ def get_flights(
     infants_in_seat: int = 0,
     infants_on_lap: int = 0,
     seat: Literal["economy", "premium-economy", "business", "first"] = "economy",
-    fetch_mode: Literal["common", "fallback", "force-fallback", "local", "bright-data"] = "common",
+    fetch_mode: Literal["common", "fallback", "force-fallback", "local"] = "common",
     max_stops: Optional[int] = None,
     data_source: DataSource = "html",
     cookies: bytes | None = None,

@@ -16,6 +16,8 @@ $ pip install fast-flights
 </div>
 
 ## Basics
+**Python version**: This project must be run with **Python 3.13**. Do not use other versions.
+
 **TL;DR**: To use `fast-flights`, you'll first create a filter (for `?tfs=`) to perform a request.
 Then, add `flight_data`, `trip`, `seat`, `passengers` to use the API directly.
 

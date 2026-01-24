@@ -131,6 +131,14 @@ class DecodedResult:
     # airport_details: Any
     # unknown_1: Any
 
+
+@dataclass
+class RoundTripDecodedResult:
+    outbound: "DecodedResult"
+    inbound: "DecodedResult"
+    selected_outbound_ref: str
+    selected_outbound: "Itinerary"
+
 class CodeshareDecoder(Decoder):
     AIRLINE_CODE: DecoderKey[AirlineCode] = DecoderKey([0])
     FLIGHT_NUMBER: DecoderKey[str] = DecoderKey([1])
