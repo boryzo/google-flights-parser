@@ -83,13 +83,26 @@ def test_multicity_live_google_search_decodes(record_property) -> None:
     assert seg1_itinerary, "No one-way itinerary with details for GDN->ICN"
     seg1_price = getattr(getattr(seg1_itinerary, "itinerary_summary", None), "price", None)
     seg1_currency = getattr(getattr(seg1_itinerary, "itinerary_summary", None), "currency", None)
+    seg1_dep_date = getattr(seg1_itinerary, "departure_date", None)
+    seg1_arr_date = getattr(seg1_itinerary, "arrival_date", None)
+    seg1_dep_time = getattr(seg1_itinerary, "departure_time", None)
+    seg1_arr_time = getattr(seg1_itinerary, "arrival_time", None)
     seg1_flights = [
         f"{getattr(f, 'airline', '')}{getattr(f, 'flight_number', '')}" for f in (seg1_itinerary.flights or [])
     ]
     record_property("multicity_seg1_price", seg1_price)
     record_property("multicity_seg1_currency", seg1_currency)
     record_property("multicity_seg1_flight_numbers", ",".join(seg1_flights))
-    print(f"[MC][live] seg1 price={seg1_price} {seg1_currency} flights={seg1_flights}")
+    record_property("multicity_seg1_departure_date", seg1_dep_date)
+    record_property("multicity_seg1_arrival_date", seg1_arr_date)
+    record_property("multicity_seg1_departure_time", seg1_dep_time)
+    record_property("multicity_seg1_arrival_time", seg1_arr_time)
+    print(
+        f"[MC][live] seg1 price={seg1_price} {seg1_currency} "
+        f"dep_date={seg1_dep_date} dep_time={seg1_dep_time} "
+        f"arr_date={seg1_arr_date} arr_time={seg1_arr_time} "
+        f"flights={seg1_flights}"
+    )
 
     seg2 = get_flights(
         flight_data=[FlightData(date=return_date, from_airport="NRT", to_airport="GDN")],
@@ -104,10 +117,23 @@ def test_multicity_live_google_search_decodes(record_property) -> None:
     assert seg2_itinerary, "No one-way itinerary with details for NRT->GDN"
     seg2_price = getattr(getattr(seg2_itinerary, "itinerary_summary", None), "price", None)
     seg2_currency = getattr(getattr(seg2_itinerary, "itinerary_summary", None), "currency", None)
+    seg2_dep_date = getattr(seg2_itinerary, "departure_date", None)
+    seg2_arr_date = getattr(seg2_itinerary, "arrival_date", None)
+    seg2_dep_time = getattr(seg2_itinerary, "departure_time", None)
+    seg2_arr_time = getattr(seg2_itinerary, "arrival_time", None)
     seg2_flights = [
         f"{getattr(f, 'airline', '')}{getattr(f, 'flight_number', '')}" for f in (seg2_itinerary.flights or [])
     ]
     record_property("multicity_seg2_price", seg2_price)
     record_property("multicity_seg2_currency", seg2_currency)
     record_property("multicity_seg2_flight_numbers", ",".join(seg2_flights))
-    print(f"[MC][live] seg2 price={seg2_price} {seg2_currency} flights={seg2_flights}")
+    record_property("multicity_seg2_departure_date", seg2_dep_date)
+    record_property("multicity_seg2_arrival_date", seg2_arr_date)
+    record_property("multicity_seg2_departure_time", seg2_dep_time)
+    record_property("multicity_seg2_arrival_time", seg2_arr_time)
+    print(
+        f"[MC][live] seg2 price={seg2_price} {seg2_currency} "
+        f"dep_date={seg2_dep_date} dep_time={seg2_dep_time} "
+        f"arr_date={seg2_arr_date} arr_time={seg2_arr_time} "
+        f"flights={seg2_flights}"
+    )
