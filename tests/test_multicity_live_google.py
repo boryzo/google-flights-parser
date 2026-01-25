@@ -137,3 +137,9 @@ def test_multicity_live_google_search_decodes(record_property) -> None:
         f"arr_date={seg2_arr_date} arr_time={seg2_arr_time} "
         f"flights={seg2_flights}"
     )
+
+    if seg1_currency and seg2_currency and seg1_currency == seg2_currency:
+        total_price = float(seg1_price) + float(seg2_price)
+        record_property("multicity_total_price", total_price)
+        record_property("multicity_total_currency", seg1_currency)
+        print(f"[MC][live] total price={total_price} {seg1_currency}")
