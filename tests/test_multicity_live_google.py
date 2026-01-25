@@ -1,9 +1,11 @@
 import logging
 import os
 from datetime import date, timedelta
+from urllib.parse import parse_qs, urlparse
 
 from fast_flights import FlightData, Passengers, create_filter, get_flights
 from fast_flights import core
+from fast_flights.flights_impl import ItinerarySummary
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +34,20 @@ def _pick_itinerary_with_details(decoded, dep_airport: str, arr_airport: str):
         if price is None:
             continue
         return itinerary
+    return None
+
+
+def _extract_multicity_summary(html_text: str) -> ItinerarySummary | None:
+    candidates = core._extract_js_data_candidates(html_text)
+    for data in candidates:
+        for item in core._iter_js_lists(data, limit=60000):
+            if isinstance(item, list):
+                for el in item:
+                    if isinstance(el, str) and len(el) > 20:
+                        try:
+                            return ItinerarySummary.from_b64(el)
+                        except Exception:
+                            continue
     return None
 
 
@@ -81,8 +97,6 @@ def test_multicity_live_google_search_decodes(record_property) -> None:
     )
     seg1_itinerary = _pick_itinerary_with_details(seg1, "GDN", "ICN")
     assert seg1_itinerary, "No one-way itinerary with details for GDN->ICN"
-    seg1_price = getattr(getattr(seg1_itinerary, "itinerary_summary", None), "price", None)
-    seg1_currency = getattr(getattr(seg1_itinerary, "itinerary_summary", None), "currency", None)
     seg1_dep_date = getattr(seg1_itinerary, "departure_date", None)
     seg1_arr_date = getattr(seg1_itinerary, "arrival_date", None)
     seg1_dep_time = getattr(seg1_itinerary, "departure_time", None)
@@ -90,16 +104,13 @@ def test_multicity_live_google_search_decodes(record_property) -> None:
     seg1_flights = [
         f"{getattr(f, 'airline', '')}{getattr(f, 'flight_number', '')}" for f in (seg1_itinerary.flights or [])
     ]
-    record_property("multicity_seg1_price", seg1_price)
-    record_property("multicity_seg1_currency", seg1_currency)
     record_property("multicity_seg1_flight_numbers", ",".join(seg1_flights))
     record_property("multicity_seg1_departure_date", seg1_dep_date)
     record_property("multicity_seg1_arrival_date", seg1_arr_date)
     record_property("multicity_seg1_departure_time", seg1_dep_time)
     record_property("multicity_seg1_arrival_time", seg1_arr_time)
     print(
-        f"[MC][live] seg1 price={seg1_price} {seg1_currency} "
-        f"dep_date={seg1_dep_date} dep_time={seg1_dep_time} "
+        f"[MC][live] seg1 dep_date={seg1_dep_date} dep_time={seg1_dep_time} "
         f"arr_date={seg1_arr_date} arr_time={seg1_arr_time} "
         f"flights={seg1_flights}"
     )
@@ -115,8 +126,6 @@ def test_multicity_live_google_search_decodes(record_property) -> None:
     )
     seg2_itinerary = _pick_itinerary_with_details(seg2, "NRT", "GDN")
     assert seg2_itinerary, "No one-way itinerary with details for NRT->GDN"
-    seg2_price = getattr(getattr(seg2_itinerary, "itinerary_summary", None), "price", None)
-    seg2_currency = getattr(getattr(seg2_itinerary, "itinerary_summary", None), "currency", None)
     seg2_dep_date = getattr(seg2_itinerary, "departure_date", None)
     seg2_arr_date = getattr(seg2_itinerary, "arrival_date", None)
     seg2_dep_time = getattr(seg2_itinerary, "departure_time", None)
@@ -124,22 +133,33 @@ def test_multicity_live_google_search_decodes(record_property) -> None:
     seg2_flights = [
         f"{getattr(f, 'airline', '')}{getattr(f, 'flight_number', '')}" for f in (seg2_itinerary.flights or [])
     ]
-    record_property("multicity_seg2_price", seg2_price)
-    record_property("multicity_seg2_currency", seg2_currency)
     record_property("multicity_seg2_flight_numbers", ",".join(seg2_flights))
     record_property("multicity_seg2_departure_date", seg2_dep_date)
     record_property("multicity_seg2_arrival_date", seg2_arr_date)
     record_property("multicity_seg2_departure_time", seg2_dep_time)
     record_property("multicity_seg2_arrival_time", seg2_arr_time)
     print(
-        f"[MC][live] seg2 price={seg2_price} {seg2_currency} "
-        f"dep_date={seg2_dep_date} dep_time={seg2_dep_time} "
+        f"[MC][live] seg2 dep_date={seg2_dep_date} dep_time={seg2_dep_time} "
         f"arr_date={seg2_arr_date} arr_time={seg2_arr_time} "
         f"flights={seg2_flights}"
     )
-
-    if seg1_currency and seg2_currency and seg1_currency == seg2_currency:
-        total_price = float(seg1_price) + float(seg2_price)
-        record_property("multicity_total_price", total_price)
-        record_property("multicity_total_currency", seg1_currency)
-        print(f"[MC][live] total price={total_price} {seg1_currency}")
+    selected_url = os.getenv(
+        "MC_LIVE_SELECTED_URL",
+        "https://www.google.com/travel/flights/search?"
+        "tfs=CBwQAhpgEgoyMDI2LTA0LTI1IiAKA0dEThIKMjAyNi0wNC0yNRoDV0FXKgJMTzIEMzgzMiIe"
+        "CgNXQVcSCjIwMjYtMDQtMjUaA0lDTioCTE8yAjk5agcIARIDR0ROcgcIARIDSUNOGh4SCjIw"
+        "MjYtMDUtMTFqBwgBEgNOUlRyBwgBEgNHRE5AAUgBcAGCAQsI____________AZgBAw"
+        "&tfu=CnRDalJJWTNodFVHa3paVGQyVGxGQlNtRjJTV2RDUnkwdExTMHRMUzB0TFMxNWJHeGpORUZC"
+        "UVVGQlIyd3lUM2hSU21sSVNHOUJFZ3RNVHpNNE16SjhURTg1T1JvTENQdkpCaEFDR2dOVlUw"
+        "UTRISEQ3eVFZPRICCAAiAwoBMA",
+    )
+    selected_params = {k: v[0] for k, v in parse_qs(urlparse(selected_url).query).items()}
+    selected_params.setdefault("hl", "en")
+    selected_params.setdefault("curr", "")
+    selected_res = core.fetch_search(selected_params, request_kwargs=req_kwargs)
+    summary = _extract_multicity_summary(selected_res.text)
+    assert summary is not None, "No multicity summary price found for selected itinerary"
+    record_property("multicity_total_price", summary.price)
+    record_property("multicity_total_currency", summary.currency)
+    record_property("multicity_total_flights", summary.flights)
+    print(f"[MC][live] total price={summary.price} {summary.currency} flights={summary.flights}")
