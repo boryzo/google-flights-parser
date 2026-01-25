@@ -145,13 +145,14 @@ def test_multicity_live_google_search_decodes(record_property) -> None:
     )
     selected_url = os.getenv(
         "MC_LIVE_SELECTED_URL",
-        "https://www.google.com/travel/flights/search?"
+        "https://www.google.com/travel/flights/booking?"
         "tfs=CBwQAhpgEgoyMDI2LTA0LTI1IiAKA0dEThIKMjAyNi0wNC0yNRoDV0FXKgJMTzIEMzgzMiIe"
-        "CgNXQVcSCjIwMjYtMDQtMjUaA0lDTioCTE8yAjk5agcIARIDR0ROcgcIARIDSUNOGh4SCjIw"
-        "MjYtMDUtMTFqBwgBEgNOUlRyBwgBEgNHRE5AAUgBcAGCAQsI____________AZgBAw"
-        "&tfu=CnRDalJJWTNodFVHa3paVGQyVGxGQlNtRjJTV2RDUnkwdExTMHRMUzB0TFMxNWJHeGpORUZC"
-        "UVVGQlIyd3lUM2hSU21sSVNHOUJFZ3RNVHpNNE16SjhURTg1T1JvTENQdkpCaEFDR2dOVlUw"
-        "UTRISEQ3eVFZPRICCAAiAwoBMA",
+        "CgNXQVcSCjIwMjYtMDQtMjUaA0lDTioCTE8yAjk5agcIARIDR0ROcgcIARIDSUNOGmISCjIw"
+        "MjYtMDUtMTEiIAoDTlJUEgoyMDI2LTA1LTExGgNXQVcqAkxPMgQxMDgwIiAKA1dBVxIKMjAy"
+        "Ni0wNS0xMRoDR0ROKgJMTzIEMzgxNWoHCAESA05SVHIHCAESA0dETkABSAFwAYIBCwj___________8BmAED"
+        "&tfu=CnhDalJJTW1zemQyWlpVbVZyYlZsQlNtRmxUa0ZDUnkwdExTMHRMUzB0TFhsc1oza3lNa0ZC"
+        "UVVGQlIyd3lUM2c0VDIxTlFtMUJFZzFNVHpFd09EQjhURTh6T0RFMUdnc0kzT1lHRUFJYUEx"
+        "VlRSRGdjY056bUJnPT0SAggAIgMKATA",
     )
     selected_params = {k: v[0] for k, v in parse_qs(urlparse(selected_url).query).items()}
     selected_params.setdefault("hl", "en")
