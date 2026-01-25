@@ -1179,8 +1179,12 @@ def get_flights_from_filter(
                     }
                 )
                 _maybe_set_tfs_segments(selected_tfs)
-                inbound_decoded = _decode_followup_from_search(selected_tfs, entry=entry)
-                if inbound_decoded and _decoded_result_has_route(inbound_decoded, destination, origin):
+                inbound_decoded = _decode_followup_from_flights(selected_tfs, entry=entry)
+                if inbound_decoded and _decoded_result_has_itineraries(inbound_decoded):
+                    if destination and origin and not _decoded_result_has_route(inbound_decoded, destination, origin):
+                        logger.warning(
+                            "RT JS flow: follow-up decode missing return route; accepting decoded itineraries."
+                        )
                     _apply_round_trip_total_price(inbound_decoded, selected_outbound)
                     debug_info["path"] = "selected_outbound_ref"
                     logger.info("RT JS flow: follow-up decode succeeded via selected outbound ref.")
