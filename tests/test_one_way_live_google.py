@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import logging
 import os
 from datetime import date, timedelta
@@ -13,6 +15,11 @@ ONE_WAY_ROUTES = [
     ("GDN", "WAW"),
     ("FRA", "MUC"),
     ("LHR", "JFK"),
+    ("GDN", "SIN"),
+    ("KRK", "JFK"),
+    ("WAW", "BKK"),
+    ("KTW", "ICN"),
+    ("WRO", "KEF"),
 ]
 EXPECTED_AIRLINES = {
     ("GDN", "LTN"): "W6",
@@ -22,6 +29,10 @@ EXPECTED_AIRLINES = {
 
 FIXED_ONE_WAY_CASES = [
     ("GDN", "MAD", "2026-06-03"),
+]
+
+FIXED_DIRECT_ONE_WAY_CASES = [
+    ("GDN", "NAP", "2026-02-27"),
 ]
 
 OUTBOUND_DAYS = int(os.getenv("OW_LIVE_OUTBOUND_DAYS", "60"))
@@ -90,6 +101,12 @@ def _assert_has_complete_details(decoded, dep_airport: str, arr_airport: str, la
             return itinerary
 
     raise AssertionError(f"No {label} itinerary with full details for {dep_airport}->{arr_airport}")
+
+
+def _all_itineraries(decoded) -> list:
+    best = getattr(decoded, "best", []) or []
+    other = getattr(decoded, "other", []) or []
+    return list(best) + list(other)
 
 
 def _expected_airline(origin: str, destination: str) -> str | None:
@@ -251,3 +268,59 @@ def test_one_way_live_google_fixed_date(origin: str, destination: str, depart_da
         _assert_itinerary_has_airline(itinerary, expected_airline, "one-way")
     record_property("one_way_details", _format_itinerary_details(itinerary, "one-way"))
     logger.info(_format_itinerary_details(itinerary, "one-way"))
+
+
+@pytest.mark.parametrize("origin,destination,depart_date", FIXED_DIRECT_ONE_WAY_CASES)
+def test_one_way_live_google_fixed_direct_filter(origin: str, destination: str, depart_date: str, record_property) -> None:
+    """
+    Verify that `max_stops=0` behaves like a "direct flights only" flag.
+
+    This test doesn't require that a direct flight exists on the date. It asserts that:
+      - the baseline (no max_stops) returns some itineraries (otherwise we skip), and
+      - the max_stops=0 result contains only 1-segment itineraries (or none).
+    """
+    _configure_test_logging()
+
+    base = get_flights(
+        flight_data=[FlightData(date=depart_date, from_airport=origin, to_airport=destination)],
+        trip="one-way",
+        seat="economy",
+        passengers=Passengers(adults=1),
+        fetch_mode="common",
+        data_source="js",
+    )
+
+    assert base is not None
+    base_its = _all_itineraries(base)
+    if not base_its:
+        pytest.skip(f"Baseline one-way returned no itineraries for {origin}->{destination} on {depart_date}")
+
+    direct = get_flights(
+        flight_data=[FlightData(date=depart_date, from_airport=origin, to_airport=destination)],
+        trip="one-way",
+        seat="economy",
+        passengers=Passengers(adults=1),
+        fetch_mode="common",
+        data_source="js",
+        max_stops=0,
+    )
+
+    assert direct is not None
+    direct_its = _all_itineraries(direct)
+
+    record_property("direct_filter_baseline_count", str(len(base_its)))
+    record_property("direct_filter_direct_count", str(len(direct_its)))
+
+    for i, it in enumerate(direct_its[:LOG_LIMIT]):
+        record_property(f"direct_filter_itinerary_{i}", _format_itinerary_details(it, "direct"))
+
+    for it in direct_its:
+        assert getattr(it, "departure_airport", None) == origin
+        assert getattr(it, "arrival_airport", None) == destination
+        flights = getattr(it, "flights", None) or []
+        assert len(flights) == 1, f"Expected direct itinerary (1 flight), got {len(flights)}"
+        f = flights[0]
+        assert getattr(f, "airline", None)
+        assert getattr(f, "flight_number", None)
+        assert getattr(f, "departure_time", None)
+        assert getattr(f, "arrival_time", None)

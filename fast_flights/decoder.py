@@ -1,6 +1,9 @@
+from __future__ import annotations
+
 import abc
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+import re
 from typing import Any, List, Generic, Optional, Sequence, TypeVar, Union, Tuple
 from typing_extensions import TypeAlias, override
 
@@ -66,6 +69,52 @@ AirportCode: TypeAlias = str
 AirportName: TypeAlias = str
 ProtobufStr: TypeAlias = str
 Minute: TypeAlias = int
+
+IATA_RE = re.compile(r"^[A-Z]{3}$")
+IATA_IN_RE = re.compile(r"\b([A-Z]{3})\b")
+
+
+def _extract_iata(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip().upper()
+    if IATA_RE.fullmatch(cleaned):
+        return cleaned
+    m = IATA_IN_RE.search(cleaned)
+    return m.group(1) if m else None
+
+
+def _normalize_airport_fields(code_value: object, name_value: object) -> tuple[str, str]:
+    """
+    Ensure airport code fields are IATA (3-letter) when available.
+
+    Google sometimes swaps "code" and "name" (e.g. arrival_airport="Zayed International Airport",
+    arrival_airport_name="AUH"). We normalize this to keep IATA in *_airport and the human
+    readable value in *_airport_name when possible.
+    """
+    code_iata = _extract_iata(code_value)
+    name_iata = _extract_iata(name_value)
+
+    code_str = code_value.strip() if isinstance(code_value, str) else ""
+    name_str = name_value.strip() if isinstance(name_value, str) else ""
+
+    if code_iata:
+        code = code_iata
+        # Keep a human name if provided and isn't just the code.
+        if name_iata and name_iata == code_iata:
+            name = code_str if (code_str and not IATA_RE.fullmatch(code_str.strip().upper())) else name_str
+        else:
+            name = name_str
+        return code, name
+
+    if name_iata:
+        # Swap: use IATA from name field, and preserve original code string as the human name.
+        code = name_iata
+        name = code_str if code_str else name_str
+        return code, name
+
+    return code_str, name_str
+
 
 @dataclass
 class Codeshare:
@@ -174,7 +223,23 @@ class FlightDecoder(Decoder):
     @classmethod
     @override
     def decode(cls, root: Union[list, NLData]) -> List[Flight]:
-        return [Flight(**cls.decode_el(NLData(el))) for el in root]
+        flights: List[Flight] = []
+        for el in root:
+            decoded = dict(cls.decode_el(NLData(el)))
+            dep_code, dep_name = _normalize_airport_fields(
+                decoded.get("departure_airport"),
+                decoded.get("departure_airport_name"),
+            )
+            arr_code, arr_name = _normalize_airport_fields(
+                decoded.get("arrival_airport"),
+                decoded.get("arrival_airport_name"),
+            )
+            decoded["departure_airport"] = dep_code
+            decoded["departure_airport_name"] = dep_name
+            decoded["arrival_airport"] = arr_code
+            decoded["arrival_airport_name"] = arr_name
+            flights.append(Flight(**decoded))
+        return flights
 
 class LayoverDecoder(Decoder):
     MINUTES: DecoderKey[int] = DecoderKey([0])

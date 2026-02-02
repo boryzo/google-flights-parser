@@ -1,5 +1,7 @@
 # core.py
 
+from __future__ import annotations
+
 import base64
 import html
 import json
@@ -591,7 +593,8 @@ def _itinerary_stops(itinerary: Itinerary) -> int:
 
 def _safe_price_value(itinerary: Itinerary) -> float:
     try:
-        return float(itinerary.itinerary_summary.price)
+        price = float(itinerary.itinerary_summary.price)
+        return price if price > 1 else float("inf")
     except Exception:
         return float("inf")
 
