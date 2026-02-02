@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import logging
 import os
 import re
@@ -8,7 +10,7 @@ from typing import Iterable
 
 import pytest
 
-from fast_flights import FlightData, Passengers, get_flights
+from fast_flights import FlightData, Passengers, create_filter, get_flights
 from fast_flights import core
 
 TIME_RE = re.compile(r"\b\d{1,2}:\d{2}\b")
@@ -23,6 +25,11 @@ LIVE_ROUTES = [
     ("LHR", "JFK"),
     ("POZ", "JFK"),
     ("WRO", "BKK"),
+    ("GDN", "BCN"),
+    ("WAW", "NRT"),
+    ("KRK", "LIS"),
+    ("WAW", "CPT"),
+    ("GDN", "DXB"),
 ]
 EXPECTED_AIRLINES = {
     ("GDN", "LTN"): "W6",
@@ -255,6 +262,49 @@ def _get_price_summary(itinerary) -> tuple[float | None, str | None]:
         return (None, currency)
 
 
+def _itinerary_flight_tuples(
+    itinerary,
+) -> list[tuple[str | None, str | None, str | None, str | None, tuple | None, tuple | None]]:
+    flights = getattr(itinerary, "flights", None) or []
+    items: list[tuple[str | None, str | None, str | None, str | None, tuple | None, tuple | None]] = []
+
+    def _norm_time(value: object) -> tuple | None:
+        if not value:
+            return None
+        if isinstance(value, (list, tuple)):
+            if len(value) == 2:
+                return (int(value[0]), int(value[1]))
+            if len(value) == 1:
+                return (int(value[0]), 0)
+        return None
+
+    for f in flights:
+        dep_t = getattr(f, "departure_time", None)
+        arr_t = getattr(f, "arrival_time", None)
+        items.append(
+            (
+                getattr(f, "airline", None),
+                str(getattr(f, "flight_number", None)) if getattr(f, "flight_number", None) is not None else None,
+                getattr(f, "departure_airport", None),
+                getattr(f, "arrival_airport", None),
+                _norm_time(dep_t),
+                _norm_time(arr_t),
+            )
+        )
+    return items
+
+
+def _find_itinerary_with_exact_flights(decoded, expected: list[tuple]) -> object | None:
+    if not decoded:
+        return None
+    best = getattr(decoded, "best", []) or []
+    other = getattr(decoded, "other", []) or []
+    for it in list(best) + list(other):
+        if _itinerary_flight_tuples(it) == expected:
+            return it
+    return None
+
+
 @pytest.mark.parametrize("origin,destination", LIVE_ROUTES)
 def test_round_trip_live_google_flights(origin: str, destination: str, record_property) -> None:
     _configure_test_logging()
@@ -348,3 +398,87 @@ def test_round_trip_live_google_flights(origin: str, destination: str, record_pr
         raise last_error
 
     raise AssertionError(f"RT live test: {origin}->{destination} had no successful attempts")
+
+
+def test_round_trip_live_google_fixed_cph_icn_etihad(record_property) -> None:
+    """
+    Diagnostic RT test for a known Etihad connection via AUH.
+
+    Case (user-reported):
+      CPH -> AUH 11:10-19:25 EY178
+      AUH -> ICN 21:10-10:50 (+1) EY822
+      ICN -> AUH 17:45-23:00 EY823
+      AUH -> CPH 02:15 (+1)-07:00 (+1) EY177
+    """
+    _configure_test_logging()
+
+    if os.getenv("RUN_FIXED_RT_CPH_ICN", "1") == "0":
+        pytest.skip("Set RUN_FIXED_RT_CPH_ICN=1 to run this live diagnostic test.")
+
+    depart_date = "2026-08-22"
+    return_date = "2026-09-07"
+
+    flight_data = [
+        FlightData(date=depart_date, from_airport="CPH", to_airport="ICN"),
+        FlightData(date=return_date, from_airport="ICN", to_airport="CPH"),
+    ]
+
+    expected_outbound = [
+        ("EY", "178", "CPH", "AUH", (11, 10), (19, 25)),
+        ("EY", "822", "AUH", "ICN", (21, 10), (10, 50)),
+    ]
+    expected_inbound = [
+        ("EY", "823", "ICN", "AUH", (17, 45), (23, 0)),
+        ("EY", "177", "AUH", "CPH", (2, 15), (7, 0)),
+    ]
+
+    last_err: Exception | None = None
+    for currency in ("PLN", "DKK"):
+        try:
+            filter_data = create_filter(
+                flight_data=flight_data,
+                trip="round-trip",
+                seat="economy",
+                passengers=Passengers(adults=1),
+            )
+            result = core.get_flights_from_filter(
+                filter_data,
+                currency=currency,
+                mode="common",
+                data_source="js",
+            )
+        except Exception as err:
+            last_err = err
+            logger.warning("RT fixed CPH-ICN (%s) fetch failed: %s", currency, err)
+            continue
+
+        assert isinstance(result, core.RoundTripDecodedResult)
+        assert result is not None
+
+        rt_debug = getattr(result, "debug", None)
+        if rt_debug is not None:
+            record_property(f"rt_debug_{currency}", json.dumps(rt_debug, default=str))
+
+        outbound = _find_itinerary_with_exact_flights(getattr(result, "outbound", None), expected_outbound)
+        inbound = _find_itinerary_with_exact_flights(getattr(result, "inbound", None), expected_inbound)
+
+        logger.info("RT fixed CPH-ICN (%s) outbound_exact=%r inbound_exact=%r", currency, bool(outbound), bool(inbound))
+        _log_itineraries(getattr(result, "outbound", None), f"outbound_{currency}")
+        _log_itineraries(getattr(result, "inbound", None), f"inbound_{currency}")
+
+        if outbound and inbound:
+            outbound_price, outbound_currency = _get_price_summary(outbound)
+            inbound_price, inbound_currency = _get_price_summary(inbound)
+            record_property(f"rt_total_price_{currency}", f"{outbound_price} {outbound_currency}")
+            record_property(f"rt_inbound_price_{currency}", f"{inbound_price} {inbound_currency}")
+            record_property(f"outbound_details_{currency}", _format_itinerary_details(outbound, "outbound"))
+            record_property(f"inbound_details_{currency}", _format_itinerary_details(inbound, "inbound"))
+            logger.info(_format_itinerary_details(outbound, f"outbound_{currency}"))
+            logger.info(_format_itinerary_details(inbound, f"inbound_{currency}"))
+            return
+
+    if last_err:
+        _dump_rt_failure_artifacts(last_err)
+        raise last_err
+
+    raise AssertionError("RT fixed CPH-ICN: expected Etihad via AUH itinerary not found (see logs).")
