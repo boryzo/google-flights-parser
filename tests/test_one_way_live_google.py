@@ -289,7 +289,6 @@ def test_one_way_live_google_fixed_date(origin: str, destination: str, depart_da
                 # Both parsers failed
                 raise last_error
 
-    assert result is not None
     itinerary = _assert_has_complete_details(result, origin, destination, "one-way")
     expected_airline = _expected_airline(origin, destination)
     if expected_airline:
@@ -328,7 +327,6 @@ def test_one_way_live_google_fixed_direct_filter(origin: str, destination: str, 
             if data_source == "html":
                 raise
 
-    assert base is not None
     base_its = _all_itineraries(base)
     if not base_its:
         pytest.skip(f"Baseline one-way returned no itineraries for {origin}->{destination} on {depart_date}")
@@ -353,7 +351,6 @@ def test_one_way_live_google_fixed_direct_filter(origin: str, destination: str, 
             if data_source == "html":
                 raise
 
-    assert direct is not None
     direct_its = _all_itineraries(direct)
 
     record_property("direct_filter_baseline_count", str(len(base_its)))

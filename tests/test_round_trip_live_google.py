@@ -356,7 +356,6 @@ def test_round_trip_live_google_flights(origin: str, destination: str, record_pr
 
         try:
             assert isinstance(result, core.RoundTripDecodedResult)
-            assert result is not None
             selected_outbound = getattr(result, "selected_outbound", None)
             if selected_outbound and _has_complete_flight_details(selected_outbound, origin, destination):
                 outbound = selected_outbound
@@ -475,7 +474,6 @@ def test_round_trip_live_google_fixed_cph_icn_etihad(record_property) -> None:
             continue
 
         assert isinstance(result, core.RoundTripDecodedResult)
-        assert result is not None
 
         rt_debug = getattr(result, "debug", None)
         if rt_debug is not None:
