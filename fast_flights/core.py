@@ -24,7 +24,7 @@ from .fallback_playwright import fallback_playwright_fetch
 from .bright_data_fetch import bright_data_fetch
 from .primp import Client, Response
 
-DataSource = Literal["html", "js"]
+DataSource = Literal["html", "js", "auto"]
 logger = logging.getLogger(__name__)
 
 SEGMENT_RE = re.compile(
@@ -1016,7 +1016,7 @@ def get_flights_from_filter(
     res1 = _fetch_with_mode(params, mode=mode, req_kwargs=req_kwargs)
 
     try:
-        if data_source == "js" and filter.trip == PB.Trip.ROUND_TRIP:
+        if (data_source == "js" or data_source == "auto") and filter.trip == PB.Trip.ROUND_TRIP:
             debug_info: dict = {"path": None, "steps": []}
 
             def _record_step(step: str, **fields) -> dict:
@@ -1313,6 +1313,19 @@ def get_flights_from_filter(
                 cookie_consent=cookie_consent,
                 target_time=target_time,
             )
+        # If data_source is "auto" and JS parsing failed, try HTML parser
+        if data_source == "auto":
+            logger.info("Round-trip JS parsing failed in auto mode, falling back to HTML parser")
+            return get_flights_from_filter(
+                filter,
+                currency=currency,
+                mode=mode,
+                data_source="html",
+                cookies=cookies,
+                request_kwargs=req_kwargs,
+                cookie_consent=cookie_consent,
+                target_time=target_time,
+            )
         raise e
 
 
@@ -1380,14 +1393,19 @@ def parse_response(
     def safe(n: Optional[LexborNode]):
         return n or blank
 
-    if data_source == "js":
+    if data_source == "js" or data_source == "auto":
         try:
             return _decode_js_result_from_html(r.text)
         except Exception as err:
-            logger.warning("JS parse failed; dumped listing HTML for debugging: %s", err)
-            _dump_listing_debug(r.text)
-            raise
+            if data_source == "js":
+                # Strict JS mode - raise the error
+                logger.warning("JS parse failed; dumped listing HTML for debugging: %s", err)
+                _dump_listing_debug(r.text)
+                raise
+            # Auto mode - log warning and fall back to HTML parser
+            logger.info("JS parse failed in auto mode, falling back to HTML parser: %s", err)
 
+    # HTML parser (or fallback from auto mode)
     parser = LexborHTMLParser(r.text)
     flights = []
 

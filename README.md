@@ -71,6 +71,27 @@ Airport.TAIPEI
 ## What's new
 - `v2.0` – New (much more succinct) API, fallback support for Playwright serverless functions, and [documentation](https://aweirddev.github.io/flights)!
 - `v2.2` - Now supports **local playwright** for sending requests.
+- **New** - Added `data_source="auto"` option for automatic fallback between JS and HTML parsers.
+
+## Data Source Options
+The `data_source` parameter controls how flight data is extracted from Google Flights:
+
+- **`"html"`** (default) - Parses HTML directly. More stable but may have less detailed data.
+- **`"js"`** - Parses JavaScript data structures. More detailed but may break if Google changes their format.
+- **`"auto"`** - **Recommended** - Tries JS parser first, automatically falls back to HTML if JS parsing fails.
+
+```python
+# Recommended: Use auto mode for best reliability
+result = get_flights(
+    flight_data=[FlightData(date="2025-01-01", from_airport="GDN", to_airport="MAD")],
+    trip="one-way",
+    seat="economy",
+    passengers=Passengers(adults=1),
+    data_source="auto",  # Automatic fallback
+)
+```
+
+For maximum reliability with detailed data, use `data_source="auto"` which provides the best of both worlds.
 
 ## Cookies & consent
 The EU region is a bit tricky to solve for now, but the fallback support should be able to handle it.

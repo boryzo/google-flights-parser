@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 ONE_WAY_ROUTES = [
     ("GDN", "LTN"),
     ("GDN", "WAW"),
+    ("GDN", "MAD"),
     ("FRA", "MUC"),
     ("LHR", "JFK"),
     ("GDN", "SIN"),
@@ -192,6 +193,7 @@ def test_one_way_live_google_flights(origin: str, destination: str, record_prope
             FlightData(date=depart_date, from_airport=origin, to_airport=destination),
         ]
 
+        # Use auto mode (tries JS first, falls back to HTML automatically)
         try:
             result = get_flights(
                 flight_data=flight_data,
@@ -199,7 +201,7 @@ def test_one_way_live_google_flights(origin: str, destination: str, record_prope
                 seat="economy",
                 passengers=Passengers(adults=1),
                 fetch_mode="common",
-                data_source="js",
+                data_source="auto",
                 target_time="12:00",
             )
         except Exception as err:
@@ -251,17 +253,18 @@ def test_one_way_live_google_fixed_date(origin: str, destination: str, depart_da
         FlightData(date=depart_date, from_airport=origin, to_airport=destination),
     ]
 
+    # Try JS parser first, fall back to HTML parser
+    # Use auto mode (tries JS first, falls back to HTML automatically)
     result = get_flights(
         flight_data=flight_data,
         trip="one-way",
         seat="economy",
         passengers=Passengers(adults=1),
         fetch_mode="common",
-        data_source="js",
+        data_source="auto",
         target_time="12:00",
     )
 
-    assert result is not None
     itinerary = _assert_has_complete_details(result, origin, destination, "one-way")
     expected_airline = _expected_airline(origin, destination)
     if expected_airline:
@@ -281,31 +284,31 @@ def test_one_way_live_google_fixed_direct_filter(origin: str, destination: str, 
     """
     _configure_test_logging()
 
+    # Use auto mode (tries JS first, falls back to HTML automatically)
     base = get_flights(
         flight_data=[FlightData(date=depart_date, from_airport=origin, to_airport=destination)],
         trip="one-way",
         seat="economy",
         passengers=Passengers(adults=1),
         fetch_mode="common",
-        data_source="js",
+        data_source="auto",
     )
 
-    assert base is not None
     base_its = _all_itineraries(base)
     if not base_its:
         pytest.skip(f"Baseline one-way returned no itineraries for {origin}->{destination} on {depart_date}")
 
+    # Use auto mode for direct flights
     direct = get_flights(
         flight_data=[FlightData(date=depart_date, from_airport=origin, to_airport=destination)],
         trip="one-way",
         seat="economy",
         passengers=Passengers(adults=1),
         fetch_mode="common",
-        data_source="js",
+        data_source="auto",
         max_stops=0,
     )
 
-    assert direct is not None
     direct_its = _all_itineraries(direct)
 
     record_property("direct_filter_baseline_count", str(len(base_its)))

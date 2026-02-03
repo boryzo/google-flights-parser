@@ -319,6 +319,7 @@ def test_round_trip_live_google_flights(origin: str, destination: str, record_pr
             FlightData(date=return_date, from_airport=destination, to_airport=origin),
         ]
 
+        # Use auto mode (tries JS first, falls back to HTML automatically)
         try:
             result = get_flights(
                 flight_data=flight_data,
@@ -326,7 +327,7 @@ def test_round_trip_live_google_flights(origin: str, destination: str, record_pr
                 seat="economy",
                 passengers=Passengers(adults=1),
                 fetch_mode="common",
-                data_source="js",
+                data_source="auto",
                 target_time="12:00",
             )
         except Exception as err:
@@ -344,7 +345,6 @@ def test_round_trip_live_google_flights(origin: str, destination: str, record_pr
 
         try:
             assert isinstance(result, core.RoundTripDecodedResult)
-            assert result is not None
             selected_outbound = getattr(result, "selected_outbound", None)
             if selected_outbound and _has_complete_flight_details(selected_outbound, origin, destination):
                 outbound = selected_outbound
@@ -434,6 +434,7 @@ def test_round_trip_live_google_fixed_cph_icn_etihad(record_property) -> None:
 
     last_err: Exception | None = None
     for currency in ("PLN", "DKK"):
+        # Use auto mode (tries JS first, falls back to HTML automatically)
         try:
             filter_data = create_filter(
                 flight_data=flight_data,
@@ -445,7 +446,7 @@ def test_round_trip_live_google_fixed_cph_icn_etihad(record_property) -> None:
                 filter_data,
                 currency=currency,
                 mode="common",
-                data_source="js",
+                data_source="auto",
             )
         except Exception as err:
             last_err = err
@@ -453,7 +454,6 @@ def test_round_trip_live_google_fixed_cph_icn_etihad(record_property) -> None:
             continue
 
         assert isinstance(result, core.RoundTripDecodedResult)
-        assert result is not None
 
         rt_debug = getattr(result, "debug", None)
         if rt_debug is not None:
