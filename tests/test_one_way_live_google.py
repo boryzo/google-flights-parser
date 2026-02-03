@@ -206,7 +206,7 @@ def test_one_way_live_google_flights(origin: str, destination: str, record_prope
                     data_source=data_source,
                     target_time="12:00",
                 )
-                break  # Success, exit data_source loop
+                break  # Success
             except Exception as err:
                 last_error = err
                 logger.warning(
