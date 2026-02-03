@@ -18,3 +18,19 @@
   - **Route Added**: GDN-MAD to parametrized one-way tests (from problem statement)
   - **Recommendation**: Monitor which parser succeeds in CI to understand if Google has permanently changed their format or if this is temporary
 
+- 2026-02-03: **Auto Data Source Feature**
+  - **Problem**: External library users hardcode `data_source="js"` and will fail when JS parser doesn't work
+  - **Solution**: Added `data_source="auto"` option
+    - Tries JS parser first for detailed data
+    - Automatically falls back to HTML parser if JS fails
+    - Works for both one-way and round-trip searches
+  - **Benefits**:
+    - Users get detailed JS data when available
+    - Automatic fallback provides resilience
+    - No code changes needed - just switch from "js" to "auto"
+  - **Implementation**:
+    - Updated DataSource type to include "auto"
+    - Modified parse_response() to handle auto mode
+    - Added round-trip auto fallback in exception handler
+  - **Recommendation**: External users should use `data_source="auto"` instead of hardcoding "js"
+
