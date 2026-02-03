@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 ONE_WAY_ROUTES = [
     ("GDN", "LTN"),
     ("GDN", "WAW"),
+    ("GDN", "MAD"),
     ("FRA", "MUC"),
     ("LHR", "JFK"),
     ("GDN", "SIN"),
