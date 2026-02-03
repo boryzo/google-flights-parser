@@ -319,27 +319,37 @@ def test_round_trip_live_google_flights(origin: str, destination: str, record_pr
             FlightData(date=return_date, from_airport=destination, to_airport=origin),
         ]
 
-        try:
-            result = get_flights(
-                flight_data=flight_data,
-                trip="round-trip",
-                seat="economy",
-                passengers=Passengers(adults=1),
-                fetch_mode="common",
-                data_source="js",
-                target_time="12:00",
-            )
-        except Exception as err:
-            last_error = err
-            logger.warning(
-                "RT live test: %s->%s failed for %s/%s: %s",
-                origin,
-                destination,
-                depart_date,
-                return_date,
-                err,
-            )
-            logger.debug("RT live test: check /tmp/fast_flights_listing.html for raw listing dump")
+        # Try JS parser first, fall back to HTML parser
+        for data_source in ["js", "html"]:
+            try:
+                result = get_flights(
+                    flight_data=flight_data,
+                    trip="round-trip",
+                    seat="economy",
+                    passengers=Passengers(adults=1),
+                    fetch_mode="common",
+                    data_source=data_source,
+                    target_time="12:00",
+                )
+                break  # Success, exit data_source loop
+            except Exception as err:
+                last_error = err
+                logger.warning(
+                    "RT live test: %s->%s failed for %s/%s with data_source=%s: %s",
+                    origin,
+                    destination,
+                    depart_date,
+                    return_date,
+                    data_source,
+                    err,
+                )
+                if data_source == "html":
+                    # Both parsers failed, try next date
+                    logger.debug("RT live test: check /tmp/fast_flights_listing.html for raw listing dump")
+                    break
+                continue  # Try next data_source
+        else:
+            # No data_source worked for this date, continue to next date
             continue
 
         try:
@@ -434,22 +444,32 @@ def test_round_trip_live_google_fixed_cph_icn_etihad(record_property) -> None:
 
     last_err: Exception | None = None
     for currency in ("PLN", "DKK"):
-        try:
-            filter_data = create_filter(
-                flight_data=flight_data,
-                trip="round-trip",
-                seat="economy",
-                passengers=Passengers(adults=1),
-            )
-            result = core.get_flights_from_filter(
-                filter_data,
-                currency=currency,
-                mode="common",
-                data_source="js",
-            )
-        except Exception as err:
-            last_err = err
-            logger.warning("RT fixed CPH-ICN (%s) fetch failed: %s", currency, err)
+        # Try JS parser first, fall back to HTML parser
+        for data_source in ["js", "html"]:
+            try:
+                filter_data = create_filter(
+                    flight_data=flight_data,
+                    trip="round-trip",
+                    seat="economy",
+                    passengers=Passengers(adults=1),
+                )
+                result = core.get_flights_from_filter(
+                    filter_data,
+                    currency=currency,
+                    mode="common",
+                    data_source=data_source,
+                )
+                logger.info(f"RT fixed CPH-ICN ({currency}): Successfully parsed with data_source={data_source}")
+                break  # Success
+            except Exception as err:
+                last_err = err
+                logger.warning("RT fixed CPH-ICN (%s) fetch failed with data_source=%s: %s", currency, data_source, err)
+                if data_source == "html":
+                    # Both parsers failed for this currency, try next currency
+                    break
+                continue  # Try next data_source
+        else:
+            # No data_source worked for this currency
             continue
 
         assert isinstance(result, core.RoundTripDecodedResult)
