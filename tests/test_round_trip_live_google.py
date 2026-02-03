@@ -319,39 +319,28 @@ def test_round_trip_live_google_flights(origin: str, destination: str, record_pr
             FlightData(date=return_date, from_airport=destination, to_airport=origin),
         ]
 
-        # Try JS parser first, fall back to HTML parser
-        result = None
-        for data_source in ["js", "html"]:
-            try:
-                result = get_flights(
-                    flight_data=flight_data,
-                    trip="round-trip",
-                    seat="economy",
-                    passengers=Passengers(adults=1),
-                    fetch_mode="common",
-                    data_source=data_source,
-                    target_time="12:00",
-                )
-                break  # Success
-            except Exception as err:
-                last_error = err
-                logger.warning(
-                    "RT live test: %s->%s failed for %s/%s with data_source=%s: %s",
-                    origin,
-                    destination,
-                    depart_date,
-                    return_date,
-                    data_source,
-                    err,
-                )
-                if data_source == "html":
-                    # Both parsers failed, try next date
-                    logger.debug("RT live test: check /tmp/fast_flights_listing.html for raw listing dump")
-                # Continue to try next data_source if not HTML yet
-
-        # Check if we got a result
-        if result is None:
-            # Both parsers failed, try next date
+        # Use auto mode (tries JS first, falls back to HTML automatically)
+        try:
+            result = get_flights(
+                flight_data=flight_data,
+                trip="round-trip",
+                seat="economy",
+                passengers=Passengers(adults=1),
+                fetch_mode="common",
+                data_source="auto",
+                target_time="12:00",
+            )
+        except Exception as err:
+            last_error = err
+            logger.warning(
+                "RT live test: %s->%s failed for %s/%s: %s",
+                origin,
+                destination,
+                depart_date,
+                return_date,
+                err,
+            )
+            logger.debug("RT live test: check /tmp/fast_flights_listing.html for raw listing dump")
             continue
 
         try:
@@ -445,32 +434,23 @@ def test_round_trip_live_google_fixed_cph_icn_etihad(record_property) -> None:
 
     last_err: Exception | None = None
     for currency in ("PLN", "DKK"):
-        # Try JS parser first, fall back to HTML parser
-        result = None
-        for data_source in ["js", "html"]:
-            try:
-                filter_data = create_filter(
-                    flight_data=flight_data,
-                    trip="round-trip",
-                    seat="economy",
-                    passengers=Passengers(adults=1),
-                )
-                result = core.get_flights_from_filter(
-                    filter_data,
-                    currency=currency,
-                    mode="common",
-                    data_source=data_source,
-                )
-                logger.info("RT fixed CPH-ICN (%s): Successfully parsed with data_source=%s", currency, data_source)
-                break  # Success
-            except Exception as err:
-                last_err = err
-                logger.warning("RT fixed CPH-ICN (%s) fetch failed with data_source=%s: %s", currency, data_source, err)
-                # Continue to try next data_source if not HTML yet
-
-        # Check if we got a result
-        if result is None:
-            # Both parsers failed for this currency, try next currency
+        # Use auto mode (tries JS first, falls back to HTML automatically)
+        try:
+            filter_data = create_filter(
+                flight_data=flight_data,
+                trip="round-trip",
+                seat="economy",
+                passengers=Passengers(adults=1),
+            )
+            result = core.get_flights_from_filter(
+                filter_data,
+                currency=currency,
+                mode="common",
+                data_source="auto",
+            )
+        except Exception as err:
+            last_err = err
+            logger.warning("RT fixed CPH-ICN (%s) fetch failed: %s", currency, err)
             continue
 
         assert isinstance(result, core.RoundTripDecodedResult)

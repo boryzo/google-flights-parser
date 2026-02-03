@@ -94,7 +94,7 @@ def test_multicity_live_google_search_decodes(record_property) -> None:
         seat="economy",
         passengers=Passengers(adults=1),
         fetch_mode="common",
-        data_source="js",
+        data_source="auto",
         target_time="12:00",
     )
     seg1_itinerary = _pick_itinerary_with_details(seg1, "GDN", "ICN")
@@ -123,7 +123,7 @@ def test_multicity_live_google_search_decodes(record_property) -> None:
         seat="economy",
         passengers=Passengers(adults=1),
         fetch_mode="common",
-        data_source="js",
+        data_source="auto",
         target_time="12:00",
     )
     seg2_itinerary = _pick_itinerary_with_details(seg2, "NRT", "GDN")

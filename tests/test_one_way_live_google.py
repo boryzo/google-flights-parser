@@ -193,38 +193,27 @@ def test_one_way_live_google_flights(origin: str, destination: str, record_prope
             FlightData(date=depart_date, from_airport=origin, to_airport=destination),
         ]
 
-        # Try JS parser first, fall back to HTML parser
-        result = None
-        for data_source in ["js", "html"]:
-            try:
-                result = get_flights(
-                    flight_data=flight_data,
-                    trip="one-way",
-                    seat="economy",
-                    passengers=Passengers(adults=1),
-                    fetch_mode="common",
-                    data_source=data_source,
-                    target_time="12:00",
-                )
-                break  # Success
-            except Exception as err:
-                last_error = err
-                logger.warning(
-                    "OW live test: %s->%s failed for %s with data_source=%s: %s",
-                    origin,
-                    destination,
-                    depart_date,
-                    data_source,
-                    err,
-                )
-                if data_source == "html":
-                    # Both parsers failed, try next date
-                    logger.debug("OW live test: check /tmp/fast_flights_listing.html for raw listing dump")
-                # Continue to try next data_source if not HTML yet
-
-        # Check if we got a result
-        if result is None:
-            # Both parsers failed, try next date
+        # Use auto mode (tries JS first, falls back to HTML automatically)
+        try:
+            result = get_flights(
+                flight_data=flight_data,
+                trip="one-way",
+                seat="economy",
+                passengers=Passengers(adults=1),
+                fetch_mode="common",
+                data_source="auto",
+                target_time="12:00",
+            )
+        except Exception as err:
+            last_error = err
+            logger.warning(
+                "OW live test: %s->%s failed for %s: %s",
+                origin,
+                destination,
+                depart_date,
+                err,
+            )
+            logger.debug("OW live test: check /tmp/fast_flights_listing.html for raw listing dump")
             continue
 
         try:
@@ -265,29 +254,16 @@ def test_one_way_live_google_fixed_date(origin: str, destination: str, depart_da
     ]
 
     # Try JS parser first, fall back to HTML parser
-    last_error: Exception | None = None
-    result = None
-    for data_source in ["js", "html"]:
-        try:
-            result = get_flights(
-                flight_data=flight_data,
-                trip="one-way",
-                seat="economy",
-                passengers=Passengers(adults=1),
-                fetch_mode="common",
-                data_source=data_source,
-                target_time="12:00",
-            )
-            logger.info("OW fixed date test: Successfully parsed with data_source=%s", data_source)
-            break  # Success
-        except Exception as err:
-            last_error = err
-            logger.warning(
-                "OW fixed date test: Failed with data_source=%s: %s", data_source, err
-            )
-            if data_source == "html":
-                # Both parsers failed
-                raise last_error
+    # Use auto mode (tries JS first, falls back to HTML automatically)
+    result = get_flights(
+        flight_data=flight_data,
+        trip="one-way",
+        seat="economy",
+        passengers=Passengers(adults=1),
+        fetch_mode="common",
+        data_source="auto",
+        target_time="12:00",
+    )
 
     itinerary = _assert_has_complete_details(result, origin, destination, "one-way")
     expected_airline = _expected_airline(origin, destination)
@@ -308,48 +284,30 @@ def test_one_way_live_google_fixed_direct_filter(origin: str, destination: str, 
     """
     _configure_test_logging()
 
-    # Try JS parser first, fall back to HTML parser for baseline
-    base = None
-    for data_source in ["js", "html"]:
-        try:
-            base = get_flights(
-                flight_data=[FlightData(date=depart_date, from_airport=origin, to_airport=destination)],
-                trip="one-way",
-                seat="economy",
-                passengers=Passengers(adults=1),
-                fetch_mode="common",
-                data_source=data_source,
-            )
-            logger.info("Direct filter test: Baseline parsed with data_source=%s", data_source)
-            break
-        except Exception as err:
-            logger.warning("Direct filter test: Baseline failed with data_source=%s: %s", data_source, err)
-            if data_source == "html":
-                raise
+    # Use auto mode (tries JS first, falls back to HTML automatically)
+    base = get_flights(
+        flight_data=[FlightData(date=depart_date, from_airport=origin, to_airport=destination)],
+        trip="one-way",
+        seat="economy",
+        passengers=Passengers(adults=1),
+        fetch_mode="common",
+        data_source="auto",
+    )
 
     base_its = _all_itineraries(base)
     if not base_its:
         pytest.skip(f"Baseline one-way returned no itineraries for {origin}->{destination} on {depart_date}")
 
-    # Try JS parser first, fall back to HTML parser for direct flights
-    direct = None
-    for data_source in ["js", "html"]:
-        try:
-            direct = get_flights(
-                flight_data=[FlightData(date=depart_date, from_airport=origin, to_airport=destination)],
-                trip="one-way",
-                seat="economy",
-                passengers=Passengers(adults=1),
-                fetch_mode="common",
-                data_source=data_source,
-                max_stops=0,
-            )
-            logger.info("Direct filter test: Direct flights parsed with data_source=%s", data_source)
-            break
-        except Exception as err:
-            logger.warning("Direct filter test: Direct flights failed with data_source=%s: %s", data_source, err)
-            if data_source == "html":
-                raise
+    # Use auto mode for direct flights
+    direct = get_flights(
+        flight_data=[FlightData(date=depart_date, from_airport=origin, to_airport=destination)],
+        trip="one-way",
+        seat="economy",
+        passengers=Passengers(adults=1),
+        fetch_mode="common",
+        data_source="auto",
+        max_stops=0,
+    )
 
     direct_its = _all_itineraries(direct)
 
