@@ -194,6 +194,7 @@ def test_one_way_live_google_flights(origin: str, destination: str, record_prope
         ]
 
         # Try JS parser first, fall back to HTML parser
+        result = None
         for data_source in ["js", "html"]:
             try:
                 result = get_flights(
@@ -219,10 +220,11 @@ def test_one_way_live_google_flights(origin: str, destination: str, record_prope
                 if data_source == "html":
                     # Both parsers failed, try next date
                     logger.debug("OW live test: check /tmp/fast_flights_listing.html for raw listing dump")
-                    break
-                continue  # Try next data_source
-        else:
-            # No data_source worked for this date, continue to next date
+                # Continue to try next data_source if not HTML yet
+
+        # Check if we got a result
+        if result is None:
+            # Both parsers failed, try next date
             continue
 
         try:
@@ -276,12 +278,12 @@ def test_one_way_live_google_fixed_date(origin: str, destination: str, depart_da
                 data_source=data_source,
                 target_time="12:00",
             )
-            logger.info(f"OW fixed date test: Successfully parsed with data_source={data_source}")
+            logger.info("OW fixed date test: Successfully parsed with data_source=%s", data_source)
             break  # Success
         except Exception as err:
             last_error = err
             logger.warning(
-                f"OW fixed date test: Failed with data_source={data_source}: {err}"
+                "OW fixed date test: Failed with data_source=%s: %s", data_source, err
             )
             if data_source == "html":
                 # Both parsers failed
@@ -319,10 +321,10 @@ def test_one_way_live_google_fixed_direct_filter(origin: str, destination: str, 
                 fetch_mode="common",
                 data_source=data_source,
             )
-            logger.info(f"Direct filter test: Baseline parsed with data_source={data_source}")
+            logger.info("Direct filter test: Baseline parsed with data_source=%s", data_source)
             break
         except Exception as err:
-            logger.warning(f"Direct filter test: Baseline failed with data_source={data_source}: {err}")
+            logger.warning("Direct filter test: Baseline failed with data_source=%s: %s", data_source, err)
             if data_source == "html":
                 raise
 
@@ -344,10 +346,10 @@ def test_one_way_live_google_fixed_direct_filter(origin: str, destination: str, 
                 data_source=data_source,
                 max_stops=0,
             )
-            logger.info(f"Direct filter test: Direct flights parsed with data_source={data_source}")
+            logger.info("Direct filter test: Direct flights parsed with data_source=%s", data_source)
             break
         except Exception as err:
-            logger.warning(f"Direct filter test: Direct flights failed with data_source={data_source}: {err}")
+            logger.warning("Direct filter test: Direct flights failed with data_source=%s: %s", data_source, err)
             if data_source == "html":
                 raise
 
