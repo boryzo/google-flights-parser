@@ -32,9 +32,7 @@ FIXED_ONE_WAY_CASES = [
     ("GDN", "MAD", "2026-06-03"),
 ]
 
-FIXED_DIRECT_ONE_WAY_CASES = [
-    ("GDN", "NAP", "2026-02-27"),
-]
+FIXED_DIRECT_ONE_WAY_CASES = []
 
 OUTBOUND_DAYS = int(os.getenv("OW_LIVE_OUTBOUND_DAYS", "60"))
 LOG_LIMIT = int(os.getenv("OW_LIVE_LOG_LIMIT", "6"))
