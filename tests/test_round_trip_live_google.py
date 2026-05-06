@@ -412,7 +412,7 @@ def test_round_trip_live_google_fixed_cph_icn_etihad(record_property) -> None:
     """
     _configure_test_logging()
 
-    if os.getenv("RUN_FIXED_RT_CPH_ICN", "1") == "0":
+    if os.getenv("RUN_FIXED_RT_CPH_ICN", "0") != "1":
         pytest.skip("Set RUN_FIXED_RT_CPH_ICN=1 to run this live diagnostic test.")
 
     depart_date = "2026-08-22"
