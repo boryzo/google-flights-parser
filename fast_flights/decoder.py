@@ -281,6 +281,10 @@ class ItineraryDecoder(Decoder):
     def decode(cls, root: Union[list, NLData]) -> List[Itinerary]:
         itineraries: List[Itinerary] = []
         for el in root:
+            # Skip non-list or structurally invalid elements (e.g. integer padding
+            # that Google occasionally inserts into the itinerary array).
+            if not isinstance(el, list) or len(el) < 2 or not isinstance(el[0], list):
+                continue
             decoded = dict(cls.decode_el(NLData(el)))
             selection_ref = None
             if isinstance(el, list) and len(el) > 2 and isinstance(el[2], str):

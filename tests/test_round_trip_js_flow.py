@@ -244,3 +244,36 @@ class RoundTripFlowTests(TestCase):
         self.assertTrue(inbound.flights)
         self.assertEqual(inbound.flights[0].airline, "DL")
         self.assertEqual(inbound.flights[0].flight_number, "456")
+
+    def test_itinerary_decoder_skips_non_list_padding_elements(self) -> None:
+        """Regression: Google sometimes inserts integer padding (e.g. 0) into the
+        itinerary list. ItineraryDecoder should skip them instead of failing."""
+        valid_itinerary = _make_itinerary_raw("OUTBOUND_REF_123456", 12345)
+        # Simulate padding elements that Google may insert (integers, None, etc.)
+        itinerary_list_with_padding = [0, None, valid_itinerary, 0]
+        outbound_raw = [None, None, [itinerary_list_with_padding], [[]]]
+        inbound_raw = _make_result_raw([_make_itinerary_raw("INBOUND_REF_654321", 23456)])
+
+        outbound_html = _wrap_js_page(_wrap_js_data(outbound_raw))
+        inbound_html = _wrap_js_page(_wrap_js_data(inbound_raw))
+
+        tfs = TFSData.from_interface(
+            flight_data=[
+                FlightData(date="2025-01-20", from_airport="SFO", to_airport="LAX"),
+                FlightData(date="2025-01-25", from_airport="LAX", to_airport="SFO"),
+            ],
+            trip="round-trip",
+            passengers=Passengers(adults=1),
+            seat="economy",
+        )
+
+        with patch.object(core, "fetch", side_effect=[_FakeResponse(outbound_html), _FakeResponse(inbound_html)]):
+            result = core.get_flights_from_filter(
+                tfs,
+                data_source="js",
+                target_time="08:00",
+            )
+
+        self.assertIsInstance(result, core.RoundTripDecodedResult)
+        assert result is not None
+        self.assertEqual(result.selected_outbound_ref, "OUTBOUND_REF_123456")
