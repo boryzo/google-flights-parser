@@ -28,9 +28,7 @@ EXPECTED_AIRLINES = {
     ("GDN", "MAD"): "W6",
 }
 
-FIXED_ONE_WAY_CASES = [
-    ("GDN", "MAD", "2026-06-03"),
-]
+FIXED_ONE_WAY_CASES = []
 
 FIXED_DIRECT_ONE_WAY_CASES = []
 
