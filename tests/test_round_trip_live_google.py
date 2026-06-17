@@ -28,8 +28,8 @@ LIVE_ROUTES = [
     ("GDN", "BCN"),
     ("WAW", "NRT"),
     ("KRK", "LIS"),
-    ("WAW", "CPT"),
-    ("GDN", "DXB"),
+    ("WAW", "CDG"),
+    ("KRK", "FCO"),
 ]
 EXPECTED_AIRLINES = {
     ("GDN", "LTN"): "W6",
