@@ -28,7 +28,9 @@ EXPECTED_AIRLINES = {
     ("GDN", "MAD"): "W6",
 }
 
-FIXED_ONE_WAY_CASES = []
+FIXED_ONE_WAY_CASES = [
+    ("GDN", "WAW", (date.today() + timedelta(days=30)).strftime("%Y-%m-%d")),
+]
 
 FIXED_DIRECT_ONE_WAY_CASES = []
 
