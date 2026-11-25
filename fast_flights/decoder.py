@@ -71,16 +71,25 @@ ProtobufStr: TypeAlias = str
 Minute: TypeAlias = int
 
 IATA_RE = re.compile(r"^[A-Z]{3}$")
-IATA_IN_RE = re.compile(r"\b([A-Z]{3})\b")
+IATA_PAREN_RE = re.compile(r"\(([A-Z]{3})\)")
 
 
-def _extract_iata(value: object) -> str | None:
+def _exact_iata(value: object) -> str | None:
     if not isinstance(value, str):
         return None
     cleaned = value.strip().upper()
     if IATA_RE.fullmatch(cleaned):
         return cleaned
-    m = IATA_IN_RE.search(cleaned)
+    return None
+
+
+def _extract_iata(value: object) -> str | None:
+    exact = _exact_iata(value)
+    if exact:
+        return exact
+    if not isinstance(value, str):
+        return None
+    m = IATA_PAREN_RE.search(value.strip().upper())
     return m.group(1) if m else None
 
 
@@ -89,29 +98,29 @@ def _normalize_airport_fields(code_value: object, name_value: object) -> tuple[s
     Ensure airport code fields are IATA (3-letter) when available.
 
     Google sometimes swaps "code" and "name" (e.g. arrival_airport="Zayed International Airport",
-    arrival_airport_name="AUH"). We normalize this to keep IATA in *_airport and the human
-    readable value in *_airport_name when possible.
+    arrival_airport_name="AUH" or "Málaga-Costa del Sol Airport" / "AGP"). Prefer an exact
+    3-letter code match in either field before checking parenthesized IATA hints, so words inside
+    airport names (such as "DEL" in "Costa del Sol") never override a real IATA code.
     """
-    code_iata = _extract_iata(code_value)
-    name_iata = _extract_iata(name_value)
+    code_exact = _exact_iata(code_value)
+    name_exact = _exact_iata(name_value)
 
     code_str = code_value.strip() if isinstance(code_value, str) else ""
     name_str = name_value.strip() if isinstance(name_value, str) else ""
 
-    if code_iata:
-        code = code_iata
-        # Keep a human name if provided and isn't just the code.
-        if name_iata and name_iata == code_iata:
-            name = code_str if (code_str and not IATA_RE.fullmatch(code_str.strip().upper())) else name_str
-        else:
-            name = name_str
-        return code, name
+    if code_exact:
+        return code_exact, name_str
 
+    if name_exact:
+        return name_exact, code_str if code_str else name_str
+
+    code_iata = _extract_iata(code_value)
+    if code_iata:
+        return code_iata, name_str if name_str else code_str
+
+    name_iata = _extract_iata(name_value)
     if name_iata:
-        # Swap: use IATA from name field, and preserve original code string as the human name.
-        code = name_iata
-        name = code_str if code_str else name_str
-        return code, name
+        return name_iata, code_str if code_str else name_str
 
     return code_str, name_str
 
