@@ -277,3 +277,106 @@ class RoundTripFlowTests(TestCase):
         self.assertIsInstance(result, core.RoundTripDecodedResult)
         assert result is not None
         self.assertEqual(result.selected_outbound_ref, "OUTBOUND_REF_123456")
+
+    def test_itinerary_decoder_skips_short_or_malformed_elements(self) -> None:
+        """Regression: non-itinerary list elements with short details (e.g. ['GDN', 0])
+        must not crash ResultDecoder with '[0, 5]' out-of-range."""
+        valid_itinerary = _make_itinerary_raw("OUTBOUND_REF_123456", 12345)
+        malformed_short = [["GDN", 0], ["summary"]]
+        outbound_raw = [None, None, [[malformed_short, valid_itinerary]], [[]]]
+        inbound_raw = _make_result_raw([_make_itinerary_raw("INBOUND_REF_654321", 23456)])
+
+        outbound_html = _wrap_js_page(_wrap_js_data(outbound_raw))
+        inbound_html = _wrap_js_page(_wrap_js_data(inbound_raw))
+
+        tfs = TFSData.from_interface(
+            flight_data=[
+                FlightData(date="2025-01-20", from_airport="SFO", to_airport="LAX"),
+                FlightData(date="2025-01-25", from_airport="LAX", to_airport="SFO"),
+            ],
+            trip="round-trip",
+            passengers=Passengers(adults=1),
+            seat="economy",
+        )
+
+        with patch.object(core, "fetch", side_effect=[_FakeResponse(outbound_html), _FakeResponse(inbound_html)]):
+            result = core.get_flights_from_filter(
+                tfs,
+                data_source="js",
+                target_time="08:00",
+            )
+
+        self.assertIsInstance(result, core.RoundTripDecodedResult)
+        assert result is not None
+        self.assertEqual(result.selected_outbound_ref, "OUTBOUND_REF_123456")
+
+    def test_round_trip_one_way_fallback_accepts_html_result(self) -> None:
+        """When RT follow-up falls back to one-way and one-way falls back to HTML Result,
+        convert Result into DecodedResult instead of failing."""
+        outbound_raw = _make_result_raw([_make_itinerary_raw("OUTBOUND_REF_123456", 50000)])
+        outbound_html = _wrap_js_page(_wrap_js_data(outbound_raw))
+        inbound_html_only = (
+            '<html><body><div jsname="IWWDBc"><ul class="Rk10dc"><li>'
+            '<div class="sSHqwe tPgKwe ogfYpf"><span>Wizz Air</span></div>'
+            '<span class="mv1WYe"><div>1:15 PM</div><div>5:10 PM</div></span>'
+            '<div class="YMlIz FpEdX">PLN\xa0250</div>'
+            '<div data-travelimpactmodelwebsiteurl="https://example.com?itinerary=LAX-SFO-W6-1654-20250125"></div>'
+            "</li></ul></div></body></html>"
+        )
+
+        tfs = TFSData.from_interface(
+            flight_data=[
+                FlightData(date="2025-01-20", from_airport="SFO", to_airport="LAX"),
+                FlightData(date="2025-01-25", from_airport="LAX", to_airport="SFO"),
+            ],
+            trip="round-trip",
+            passengers=Passengers(adults=1),
+            seat="economy",
+        )
+
+        with (
+            patch.object(core, "fetch", side_effect=[_FakeResponse(outbound_html), _FakeResponse("<html></html>"), _FakeResponse(inbound_html_only)]),
+            patch.object(core, "fetch_search", side_effect=RuntimeError("search blocked")),
+        ):
+            result = core.get_flights_from_filter(
+                tfs,
+                currency="PLN",
+                data_source="auto",
+                target_time="08:00",
+            )
+
+        self.assertIsInstance(result, core.RoundTripDecodedResult)
+        assert result is not None
+        self.assertEqual(result.selected_outbound_ref, "one-way-fallback")
+        self.assertEqual(len(result.inbound.best), 1)
+        self.assertEqual(result.inbound.best[0].departure_airport, "LAX")
+        self.assertEqual(result.inbound.best[0].arrival_airport, "SFO")
+        self.assertEqual(result.inbound.best[0].itinerary_summary.price, 500.0)
+
+    def test_fetch_retries_on_sgsync_bot_challenge(self) -> None:
+        class _FakeClient:
+            calls = 0
+
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def get(self, url, params=None, **kwargs):
+                _FakeClient.calls += 1
+                if _FakeClient.calls == 1:
+                    return type("R", (), {
+                        "status_code": 200,
+                        "url": "https://www.google.com/sgsync?url=...",
+                        "text": "<html><head><title>Verifying...</title></head></html>",
+                        "text_markdown": "Verifying...",
+                    })()
+                return type("R", (), {
+                    "status_code": 200,
+                    "url": "https://www.google.com/travel/flights?tfs=abc",
+                    "text": "<html><script class='ds:1'>AF_initDataCallback({});</script></html>",
+                    "text_markdown": "Flights",
+                })()
+
+        with patch.object(core, "Client", _FakeClient), patch.object(core.time, "sleep"):
+            res = core.fetch({"tfs": "abc"})
+        self.assertEqual(_FakeClient.calls, 2)
+        self.assertIn("travel/flights", res.url)
