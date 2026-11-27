@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+import time
 import urllib.parse
 from datetime import datetime
 from typing import List, Literal, Optional, Union
@@ -15,9 +16,9 @@ from urllib.parse import parse_qs, urlparse
 
 from selectolax.lexbor import LexborHTMLParser, LexborNode
 
-from .decoder import DecodedResult, Itinerary, ResultDecoder, RoundTripDecodedResult
+from .decoder import DecodedResult, Flight as DecodedFlight, Itinerary, ResultDecoder, RoundTripDecodedResult
 from .schema import Flight, Result, Segment
-from .flights_impl import FlightData, Passengers, segments_from_tfs, build_tfs_with_segments
+from .flights_impl import FlightData, ItinerarySummary, Passengers, segments_from_tfs, build_tfs_with_segments
 from . import flights_pb2 as PB
 from .filter import TFSData
 from .fallback_playwright import fallback_playwright_fetch
@@ -91,28 +92,78 @@ _B64_STRING_RE = re.compile(r'["\']([A-Za-z0-9\-_+/=]{60,})["\']')
 _B64ISH_RE = re.compile(r"^[A-Za-z0-9\-_+/=]+$")
 
 
-def fetch(params: dict, request_kwargs: dict | None = None) -> Response:
-    client = Client(impersonate="chrome_126", verify=False)
+_DESKTOP_IMPERSONATES: tuple[tuple[str, str], ...] = (
+    ("chrome_145", "windows"),
+    ("firefox_148", "windows"),
+    ("edge_145", "macos"),
+    ("chrome_145", "macos"),
+    ("safari_18.5", "macos"),
+)
+_PROFILE_OFFSET = 0
+
+
+def _create_client(profile_index: int = 0) -> Client:
+    global _PROFILE_OFFSET
+    idx = (_PROFILE_OFFSET + profile_index) % len(_DESKTOP_IMPERSONATES)
+    if profile_index > 0:
+        _PROFILE_OFFSET = (_PROFILE_OFFSET + 1) % len(_DESKTOP_IMPERSONATES)
+    imp, imp_os = _DESKTOP_IMPERSONATES[idx]
+    try:
+        return Client(impersonate=imp, impersonate_os=imp_os, verify=False)
+    except Exception:
+        return Client(verify=False)
+
+
+def _is_bot_or_unhydrated_response(res: Response) -> bool:
+    url = str(getattr(res, "url", "") or "").lower()
+    text = getattr(res, "text", "") or ""
+    text_lower = text.lower()
+    if "sgsync" in url or "<title>verifying...</title>" in text_lower:
+        return True
+    if "AF_initDataCallback" not in text and 'jsname="IWWDBc"' not in text and 'jsname="YdtKid"' not in text:
+        return True
+    return False
+
+
+def _fetch_with_profile_retry(
+    url: str,
+    params: dict,
+    request_kwargs: dict | None = None,
+    *,
+    max_attempts: int = 3,
+) -> Response:
     req_kwargs = request_kwargs.copy() if request_kwargs else {}
-    res = client.get("https://www.google.com/travel/flights", params=params, **req_kwargs)
-    assert res.status_code == 200, f"{res.status_code} Result: {res.text_markdown}"
-    return res
+    last_res: Response | None = None
+    for attempt in range(max_attempts):
+        client = _create_client(attempt)
+        res = client.get(url, params=params, **req_kwargs)
+        last_res = res
+        if res.status_code == 200 and not _is_bot_or_unhydrated_response(res):
+            return res
+        if attempt + 1 < max_attempts:
+            logger.warning(
+                "Google Flights fetch returned status=%s url=%s (attempt %d/%d); retrying with another profile",
+                res.status_code,
+                str(getattr(res, "url", url))[:100],
+                attempt + 1,
+                max_attempts,
+            )
+            time.sleep(0.5 * (attempt + 1))
+    assert last_res is not None
+    assert last_res.status_code == 200, f"{last_res.status_code} Result: {last_res.text_markdown}"
+    return last_res
+
+
+def fetch(params: dict, request_kwargs: dict | None = None) -> Response:
+    return _fetch_with_profile_retry("https://www.google.com/travel/flights", params, request_kwargs)
 
 
 def fetch_search(params: dict, request_kwargs: dict | None = None) -> Response:
-    client = Client(impersonate="chrome_126", verify=False)
-    req_kwargs = request_kwargs.copy() if request_kwargs else {}
-    res = client.get("https://www.google.com/travel/flights/search", params=params, **req_kwargs)
-    assert res.status_code == 200, f"{res.status_code} Result: {res.text_markdown}"
-    return res
+    return _fetch_with_profile_retry("https://www.google.com/travel/flights/search", params, request_kwargs)
 
 
 def fetch_booking(tfs: str, request_kwargs: dict | None = None) -> Response:
-    client = Client(impersonate="chrome_126", verify=False)
-    req_kwargs = request_kwargs.copy() if request_kwargs else {}
-    res = client.get("https://www.google.com/travel/flights/booking", params={"tfs": tfs}, **req_kwargs)
-    assert res.status_code == 200, f"{res.status_code} Result: {res.text_markdown}"
-    return res
+    return _fetch_with_profile_retry("https://www.google.com/travel/flights/booking", {"tfs": tfs}, request_kwargs)
 
 
 def _merge_binary_cookies(cookies_bytes: bytes | None, request_kwargs: dict | None) -> dict:
@@ -317,9 +368,10 @@ def _looks_like_itinerary(el: object) -> bool:
 def _looks_like_itinerary_list(candidate: object) -> bool:
     if not isinstance(candidate, list) or not candidate:
         return False
-    if not all(_looks_like_itinerary(el) for el in candidate):
+    valid = [el for el in candidate if _looks_like_itinerary(el)]
+    if not valid:
         return False
-    for el in candidate:
+    for el in valid:
         try:
             details = el[0]
             dep = details[3]
@@ -976,6 +1028,118 @@ def _fetch_with_mode(
     return fallback_playwright_fetch(params, request_kwargs=req_kwargs)
 
 
+def _parse_html_time_pair(raw: str) -> tuple[int, int]:
+    text = (raw or "").strip()
+    if not text:
+        return (0, 0)
+    m = re.search(r"(\d{1,2}):(\d{2})\s*(AM|PM)?", text, re.IGNORECASE)
+    if not m:
+        return (0, 0)
+    hour = int(m.group(1))
+    minute = int(m.group(2))
+    ampm = (m.group(3) or "").upper()
+    if ampm == "PM" and hour < 12:
+        hour += 12
+    elif ampm == "AM" and hour == 12:
+        hour = 0
+    if 0 <= hour <= 23 and 0 <= minute <= 59:
+        return (hour, minute)
+    return (0, 0)
+
+
+def _parse_date_tuple(date_str: str) -> tuple[int, int, int]:
+    try:
+        dt = datetime.strptime(str(date_str).strip(), "%Y-%m-%d")
+        return (dt.year, dt.month, dt.day)
+    except Exception:
+        return (1970, 1, 1)
+
+
+def _parse_html_price(raw_price: object) -> float:
+    if isinstance(raw_price, (int, float)):
+        return float(raw_price)
+    text = str(raw_price or "").replace(",", "").replace("\xa0", " ")
+    m = re.search(r"(\d+(?:\.\d+)?)", text)
+    return float(m.group(1)) if m else 0.0
+
+
+def _result_to_decoded_result(
+    res: Result,
+    *,
+    default_origin: str,
+    default_destination: str,
+    default_date: str,
+    currency: str = "",
+) -> Optional[DecodedResult]:
+    itineraries: list[Itinerary] = []
+    for fl in getattr(res, "flights", []) or []:
+        segs = list(getattr(fl, "segments", None) or [])
+        dep_date_str = segs[0].date if segs and getattr(segs[0], "date", None) else default_date
+        arr_date_str = segs[-1].date if segs and getattr(segs[-1], "date", None) else dep_date_str
+        dep_date_t = _parse_date_tuple(dep_date_str)
+        arr_date_t = _parse_date_tuple(arr_date_str)
+        dep_time_t = _parse_html_time_pair(getattr(fl, "departure", ""))
+        arr_time_t = _parse_html_time_pair(getattr(fl, "arrival", ""))
+        dep_airport = (segs[0].origin if segs and getattr(segs[0], "origin", None) else default_origin) or default_origin
+        arr_airport = (segs[-1].destination if segs and getattr(segs[-1], "destination", None) else default_destination) or default_destination
+
+        decoded_flights: list[DecodedFlight] = []
+        for idx, s in enumerate(segs):
+            s_date = _parse_date_tuple(getattr(s, "date", "") or dep_date_str)
+            s_dep_t = dep_time_t if idx == 0 else (0, 0)
+            s_arr_t = arr_time_t if idx == len(segs) - 1 else (0, 0)
+            decoded_flights.append(
+                DecodedFlight(
+                    airline=getattr(s, "carrier_code", "") or "",
+                    airline_name=getattr(fl, "name", "") or getattr(s, "carrier_code", "") or "",
+                    flight_number=str(getattr(s, "flight_number", "") or ""),
+                    operator="",
+                    codeshares=[],
+                    aircraft="",
+                    departure_airport=getattr(s, "origin", "") or dep_airport,
+                    departure_airport_name=getattr(s, "origin", "") or dep_airport,
+                    arrival_airport=getattr(s, "destination", "") or arr_airport,
+                    arrival_airport_name=getattr(s, "destination", "") or arr_airport,
+                    departure_date=s_date,
+                    arrival_date=s_date,
+                    departure_time=s_dep_t,
+                    arrival_time=s_arr_t,
+                    travel_time=getattr(fl, "duration_minutes", None) or 0,
+                    seat_pitch_short="",
+                )
+            )
+        carrier_code = decoded_flights[0].airline if decoded_flights else ""
+        airline_name = getattr(fl, "name", "") or carrier_code
+        flight_codes = ",".join(
+            f"{df.airline}{df.flight_number}" for df in decoded_flights if df.airline and df.flight_number
+        )
+        itineraries.append(
+            Itinerary(
+                airline_code=carrier_code,
+                airline_names=[airline_name] if airline_name else [],
+                flights=decoded_flights,
+                layovers=[],
+                travel_time=getattr(fl, "duration_minutes", None) or 0,
+                departure_airport=dep_airport,
+                arrival_airport=arr_airport,
+                departure_date=dep_date_t,
+                arrival_date=arr_date_t,
+                departure_time=dep_time_t,
+                arrival_time=arr_time_t,
+                itinerary_summary=ItinerarySummary(
+                    flights=flight_codes,
+                    price=_parse_html_price(getattr(fl, "price", 0)),
+                    currency=currency or "PLN",
+                ),
+            )
+        )
+    if not itineraries:
+        return None
+    best = [it for it, fl in zip(itineraries, res.flights) if getattr(fl, "is_best", False)]
+    other = [it for it, fl in zip(itineraries, res.flights) if not getattr(fl, "is_best", False)]
+    return DecodedResult(raw=[], best=best, other=other)
+
+
 def get_flights_from_filter(
     filter: TFSData,
     currency: str = "",
@@ -1096,6 +1260,8 @@ def get_flights_from_filter(
             outbound_raw = _extract_js_data(res1.text)
             try:
                 outbound_decoded = ResultDecoder.decode(outbound_raw)
+                if not _decoded_result_has_itineraries(outbound_decoded):
+                    raise RuntimeError("Primary outbound decode returned no itineraries")
             except Exception as err:
                 logger.warning("RT JS flow: primary outbound decode failed; trying multi-candidate decode: %s", err)
                 _dump_listing_debug(res1.text)
@@ -1280,6 +1446,14 @@ def get_flights_from_filter(
                     cookie_consent=cookie_consent,
                     target_time=target_time,
                 )
+                if isinstance(fallback_result, Result):
+                    fallback_result = _result_to_decoded_result(
+                        fallback_result,
+                        default_origin=getattr(return_leg, "from_airport", "") or (destination or ""),
+                        default_destination=getattr(return_leg, "to_airport", "") or (origin or ""),
+                        default_date=getattr(return_leg, "date", "") or "",
+                        currency=currency,
+                    )
                 if isinstance(fallback_result, DecodedResult):
                     logger.info("RT JS flow: one-way fallback decode succeeded.")
                     _apply_round_trip_total_price(fallback_result, selected_outbound)

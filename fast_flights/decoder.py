@@ -234,6 +234,8 @@ class FlightDecoder(Decoder):
     def decode(cls, root: Union[list, NLData]) -> List[Flight]:
         flights: List[Flight] = []
         for el in root:
+            if not isinstance(el, list):
+                continue
             decoded = dict(cls.decode_el(NLData(el)))
             dep_code, dep_name = _normalize_airport_fields(
                 decoded.get("departure_airport"),
@@ -291,10 +293,13 @@ class ItineraryDecoder(Decoder):
         itineraries: List[Itinerary] = []
         for el in root:
             # Skip non-list or structurally invalid elements (e.g. integer padding
-            # that Google occasionally inserts into the itinerary array).
-            if not isinstance(el, list) or len(el) < 2 or not isinstance(el[0], list):
+            # or truncated metadata entries that Google occasionally inserts).
+            if not isinstance(el, list) or len(el) < 2 or not isinstance(el[0], list) or len(el[0]) < 9:
                 continue
-            decoded = dict(cls.decode_el(NLData(el)))
+            try:
+                decoded = dict(cls.decode_el(NLData(el)))
+            except (AssertionError, IndexError, KeyError, TypeError, ValueError):
+                continue
             selection_ref = None
             if isinstance(el, list) and len(el) > 2 and isinstance(el[2], str):
                 selection_ref = el[2]
